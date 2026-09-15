@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="es-419">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#4b6a8f">
+<title>Mantenimiento — TicketFlow</title>
+<style>
+/* Hereda a proposito los tokens de TicketFlow.html: es la misma app vista desde
+   el telefono, no un producto distinto. Lo que cambia es la escala — todo mas
+   grande, porque esto se usa parado en una sala de maquinas y con una mano. */
+:root{
+  --bg:#f5f5f7;
+  --surface:#ffffff;
+  --surface-2:#fafafc;
+  --surface-3:#ececed;
+  --hover:rgba(0,0,0,.045);
+  --text:#1d1d1f;
+  --text-2:#6e6e73;
+  --text-3:#9a9aa0;
+  --line:rgba(0,0,0,.07);
+  --line-2:rgba(0,0,0,.13);
+  --accent:#4b6a8f;
+  --accent-soft:rgba(75,106,143,.11);
+  --open:#9a6410;      --open-soft:rgba(154,100,16,.13);
+  --progress:#2f5ea8;  --progress-soft:rgba(47,94,168,.12);
+  --resolved:#1f7a4d;  --resolved-soft:rgba(31,122,77,.13);
+  --alert:#b23b2e;     --alert-soft:rgba(178,59,46,.11);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.05);
+  --shadow-lg:0 -6px 40px rgba(0,0,0,.18);
+  --r:14px; --r-sm:10px;
+  --safe-b:env(safe-area-inset-bottom,0px);
+}
+:root[data-theme="dark"]{
+  --bg:#141416;
+  --surface:#1f1f22;
+  --surface-2:#252528;
+  --surface-3:#2e2e32;
+  --hover:rgba(255,255,255,.05);
+  --text:#f2f2f5;
+  --text-2:#9e9ea6;
+  --text-3:#72727a;
+  --line:rgba(255,255,255,.08);
+  --line-2:rgba(255,255,255,.15);
+  --accent:#7fa3cc;
+  --accent-soft:rgba(127,163,204,.16);
+  --open:#e3b155;      --open-soft:rgba(227,177,85,.16);
+  --progress:#6b9bf5;  --progress-soft:rgba(107,155,245,.18);
+  --resolved:#45c98a;  --resolved-soft:rgba(69,201,138,.16);
+  --alert:#f0806b;     --alert-soft:rgba(240,128,107,.16);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35);
+  --shadow-lg:0 -6px 40px rgba(0,0,0,.6);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{margin:0;padding:0;height:100%;}
+body{
+  background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  font-size:15px;line-height:1.45;-webkit-font-smoothing:antialiased;letter-spacing:-0.01em;
+  overflow:hidden;
+}
+button,input,select,textarea{font:inherit;color:inherit;letter-spacing:inherit;}
+button{cursor:pointer;background:none;border:none;padding:0;}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;}}
+
+/* ---------- cabecera ---------- */
+.top{
+  position:fixed;top:0;left:0;right:0;z-index:20;
+  background:var(--surface);border-bottom:1px solid var(--line);
+  padding:calc(env(safe-area-inset-top,0px) + 10px) 14px 10px;
+  display:flex;align-items:center;gap:10px;
+}
+.top .mark{width:30px;height:30px;border-radius:9px;background:var(--accent);display:grid;place-items:center;flex:none;}
+.top h1{margin:0;font-size:16px;font-weight:650;letter-spacing:-0.02em;}
+.top .sub{font-size:11.5px;color:var(--text-3);margin-top:-2px;}
+.top .sp{flex:1;}
+.iconbtn{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;color:var(--text-2);}
+.iconbtn:active{background:var(--hover);}
+.iconbtn svg{width:20px;height:20px;}
+
+#sync{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-3);}
+#sync .dot{width:7px;height:7px;border-radius:50%;background:var(--resolved);}
+#sync[data-s="saving"] .dot{background:var(--progress);}
+#sync[data-s="pending"] .dot{background:var(--open);}
+#sync[data-s="off"] .dot{background:var(--alert);}
+
+/* ---------- filtros ---------- */
+.filters{
+  position:fixed;left:0;right:0;z-index:19;
+  top:calc(env(safe-area-inset-top,0px) + 51px);
+  background:var(--bg);padding:10px 14px 8px;
+  border-bottom:1px solid var(--line);
+}
+.chips{display:flex;gap:7px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px;}
+.chips::-webkit-scrollbar{display:none;}
+.chip{
+  flex:none;height:34px;padding:0 13px;border-radius:17px;
+  border:1px solid var(--line-2);background:var(--surface);
+  font-size:13.5px;color:var(--text-2);display:flex;align-items:center;gap:6px;
+}
+.chip b{font-weight:600;color:var(--text-3);font-size:12px;}
+.chip.on{background:var(--accent);border-color:var(--accent);color:#fff;}
+.chip.on b{color:rgba(255,255,255,.75);}
+.bld{
+  margin-top:8px;width:100%;height:38px;border-radius:var(--r-sm);
+  border:1px solid var(--line-2);background:var(--surface);color:var(--text);
+  padding:0 10px;font-size:14px;appearance:none;
+}
+.bld.on{border-color:var(--accent);color:var(--accent);}
+
+/* ---------- lista ---------- */
+.list{
+  position:absolute;top:calc(env(safe-area-inset-top,0px) + 150px);bottom:0;left:0;right:0;
+  overflow-y:auto;-webkit-overflow-scrolling:touch;
+  padding:12px 14px calc(96px + var(--safe-b));
+}
+.card{
+  width:100%;text-align:left;background:var(--surface);border:1px solid var(--line);
+  border-radius:var(--r);padding:13px 14px;margin-bottom:10px;box-shadow:var(--shadow-sm);
+  display:block;
+}
+.card:active{background:var(--surface-2);}
+.card .r1{display:flex;align-items:baseline;gap:8px;}
+.card .loc{font-weight:650;font-size:15.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.card .age{font-size:12px;color:var(--text-3);flex:none;}
+.card .age.late{color:var(--alert);font-weight:600;}
+.card .nm{font-size:13px;color:var(--text-2);margin-top:1px;}
+.card .snip{
+  font-size:13.5px;color:var(--text-2);margin-top:7px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.card .r2{display:flex;align-items:center;gap:7px;margin-top:10px;flex-wrap:wrap;}
+
+.tag{font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:7px;}
+.tag.open{background:var(--open-soft);color:var(--open);}
+.tag.progress{background:var(--progress-soft);color:var(--progress);}
+.tag.resolved{background:var(--resolved-soft);color:var(--resolved);}
+.pr{font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:7px;background:var(--surface-3);color:var(--text-2);}
+.pr.urgent{background:var(--alert-soft);color:var(--alert);}
+.pr.high{background:var(--open-soft);color:var(--open);}
+.notecount{font-size:11.5px;color:var(--text-3);margin-left:auto;}
+
+.empty{text-align:center;color:var(--text-3);padding:56px 24px;font-size:14px;}
+
+/* ---------- boton de alta ---------- */
+.fab{
+  position:fixed;right:16px;bottom:calc(16px + var(--safe-b));z-index:21;
+  height:54px;padding:0 22px 0 18px;border-radius:27px;
+  background:var(--accent);color:#fff;font-size:16px;font-weight:600;
+  display:flex;align-items:center;gap:8px;box-shadow:0 6px 20px rgba(0,0,0,.22);
+}
+.fab:active{transform:scale(.97);}
+.fab svg{width:21px;height:21px;}
+
+/* ---------- panel deslizable (detalle y alta) ---------- */
+.sheet{
+  position:fixed;inset:0;z-index:40;background:var(--bg);
+  display:flex;flex-direction:column;
+  transform:translateY(100%);transition:transform .22s ease;
+  visibility:hidden;
+}
+.sheet.on{transform:none;visibility:visible;}
+.sheet-top{
+  flex:none;background:var(--surface);border-bottom:1px solid var(--line);
+  padding:calc(env(safe-area-inset-top,0px) + 10px) 14px 10px;
+  display:flex;align-items:center;gap:10px;
+}
+.sheet-top h2{margin:0;font-size:16px;font-weight:650;flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.sheet-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px calc(24px + var(--safe-b));}
+.sheet-foot{
+  flex:none;background:var(--surface);border-top:1px solid var(--line);
+  padding:10px 14px calc(10px + var(--safe-b));display:flex;gap:10px;
+}
+
+.block{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px;}
+.block h3{margin:0 0 9px;font-size:12px;font-weight:600;color:var(--text-3);letter-spacing:.02em;}
+.facts{display:flex;flex-wrap:wrap;gap:14px 22px;}
+.fact .k{font-size:11.5px;color:var(--text-3);}
+.fact .v{font-size:14.5px;font-weight:600;margin-top:1px;}
+.fact .v.warn{color:var(--alert);}
+.desc{font-size:14.5px;white-space:pre-wrap;}
+.contacto{display:flex;gap:10px;margin-top:10px;}
+.contacto a{
+  flex:1;height:42px;border-radius:var(--r-sm);border:1px solid var(--line-2);
+  display:flex;align-items:center;justify-content:center;gap:7px;
+  color:var(--accent);text-decoration:none;font-size:14px;font-weight:600;
+}
+.contacto svg{width:17px;height:17px;}
+
+.states{display:flex;gap:8px;}
+.state{
+  flex:1;height:46px;border-radius:var(--r-sm);border:1px solid var(--line-2);
+  background:var(--surface-2);font-size:14px;font-weight:600;color:var(--text-2);
+}
+.state.on{color:#fff;border-color:transparent;}
+.state.on[data-st="open"]{background:var(--open);}
+.state.on[data-st="progress"]{background:var(--progress);}
+.state.on[data-st="resolved"]{background:var(--resolved);}
+
+.note{padding:10px 0;border-top:1px solid var(--line);}
+.note:first-of-type{border-top:none;}
+.note time{font-size:11.5px;color:var(--text-3);display:block;}
+.note p{margin:3px 0 0;font-size:14px;white-space:pre-wrap;}
+.note .by{font-size:11.5px;color:var(--text-3);}
+
+label.f{display:block;font-size:12.5px;color:var(--text-2);margin:0 0 5px;font-weight:500;}
+.inp{
+  width:100%;background:var(--surface);color:var(--text);
+  border:1px solid var(--line-2);border-radius:var(--r-sm);
+  padding:12px;font-size:16px;  /* 16px evita que iOS haga zoom al enfocar */
+}
+.inp:focus{border-color:var(--accent);outline:none;}
+textarea.inp{min-height:110px;resize:vertical;}
+select.inp{appearance:none;}
+.fld{margin-bottom:14px;}
+
+.btn{
+  height:48px;border-radius:var(--r-sm);border:1px solid var(--line-2);
+  background:var(--surface);font-size:15px;font-weight:600;padding:0 18px;
+}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+.btn.wide{flex:1;}
+.btn:disabled{opacity:.5;}
+
+/* ---------- login ---------- */
+#gate{
+  position:fixed;inset:0;z-index:60;background:var(--bg);
+  display:none;align-items:center;justify-content:center;padding:24px;
+}
+#gate.on{display:flex;}
+#gate .box{width:100%;max-width:340px;}
+#gate .mark{width:44px;height:44px;border-radius:13px;background:var(--accent);display:grid;place-items:center;margin-bottom:16px;}
+#gate h2{margin:0;font-size:22px;font-weight:650;}
+#gate p.lead{margin:2px 0 22px;color:var(--text-2);font-size:14px;}
+#gate #gMsg{color:var(--alert);font-size:13.5px;min-height:20px;margin:10px 0 0;}
+
+/* ---------- aviso ---------- */
+#toast{
+  position:fixed;left:50%;bottom:calc(84px + var(--safe-b));transform:translate(-50%,14px);
+  background:var(--text);color:var(--bg);padding:11px 18px;border-radius:22px;
+  font-size:14px;font-weight:500;z-index:80;opacity:0;pointer-events:none;
+  transition:opacity .18s,transform .18s;max-width:88vw;text-align:center;
+}
+#toast.on{opacity:1;transform:translate(-50%,0);}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div class="mark">
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+    </svg>
+  </div>
+  <div>
+    <h1>Mantenimiento</h1>
+    <div class="sub">TicketFlow · Estudio Giussani</div>
+  </div>
+  <div class="sp"></div>
+  <div id="sync" data-s="ok"><span class="dot"></span><span class="lbl"></span></div>
+  <button class="iconbtn" id="themeBtn" title="Claro / oscuro">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="themeIcon"></svg>
+  </button>
+  <button class="iconbtn" id="outBtn" title="Cerrar sesión">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+    </svg>
+  </button>
+</div>
+
+<div class="filters">
+  <div class="chips" id="chips"></div>
+  <select class="bld" id="bldSel"></select>
+</div>
+
+<div class="list" id="list"></div>
+
+<button class="fab" id="newBtn">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+  Nuevo
+</button>
+
+<!-- ================= detalle ================= -->
+<div class="sheet" id="detalle">
+  <div class="sheet-top">
+    <button class="iconbtn" id="dBack">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m14 6-6 6 6 6"/></svg>
+    </button>
+    <h2 id="dTitle"></h2>
+  </div>
+  <div class="sheet-body" id="dBody"></div>
+</div>
+
+<!-- ================= alta ================= -->
+<div class="sheet" id="alta">
+  <div class="sheet-top">
+    <button class="iconbtn" id="aBack">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <h2>Nuevo reclamo</h2>
+  </div>
+  <div class="sheet-body">
+    <div class="fld">
+      <label class="f" for="aLoc">Edificio / unidad</label>
+      <input class="inp" id="aLoc" placeholder="ej. Belgrano 1450 — 3A" autocomplete="off">
+    </div>
+    <div class="fld">
+      <label class="f" for="aDesc">¿Qué pasó?</label>
+      <textarea class="inp" id="aDesc" placeholder="Describí el problema: qué falla, desde cuándo, dónde exactamente…"></textarea>
+    </div>
+    <div class="fld">
+      <label class="f" for="aPri">Prioridad</label>
+      <select class="inp" id="aPri"></select>
+    </div>
+    <div class="fld">
+      <label class="f" for="aCust">Quién lo reportó <span style="color:var(--text-3)">(opcional)</span></label>
+      <input class="inp" id="aCust" placeholder="Nombre del vecino o encargado" autocomplete="off">
+    </div>
+    <div class="fld">
+      <label class="f" for="aPhone">Teléfono <span style="color:var(--text-3)">(opcional)</span></label>
+      <input class="inp" id="aPhone" type="tel" placeholder="+54 11 …" autocomplete="off">
+    </div>
+  </div>
+  <div class="sheet-foot">
+    <button class="btn primary wide" id="aSave">Crear reclamo</button>
+  </div>
+</div>
+
+<!-- ================= login ================= -->
+<div id="gate">
+  <div class="box">
+    <div class="mark">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+      </svg>
+    </div>
+    <h2>Mantenimiento</h2>
+    <p class="lead">Estudio Giussani · reclamos de mantenimiento</p>
+    <div class="fld">
+      <label class="f" for="gUser">Usuario</label>
+      <input class="inp" id="gUser" autocomplete="username" autocapitalize="none" spellcheck="false">
+    </div>
+    <div class="fld">
+      <label class="f" for="gPass">Contraseña</label>
+      <input class="inp" id="gPass" type="password" autocomplete="current-password" autocapitalize="none" spellcheck="false">
+    </div>
+    <button class="btn primary wide" id="gBtn" style="width:100%">Ingresar</button>
+    <p id="gMsg"></p>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(function(){
+"use strict";
+
+/* ============================================================
+   CONFIGURACION — completar con la misma URL /exec que TicketFlow.html
+   ============================================================ */
+const API_URL = "PEGAR_AQUI_LA_URL_EXEC";
+
+/* Comparte token y tema con TicketFlow.html: si las dos paginas estan en el
+   mismo dominio, se entra una sola vez. La cola de escritura SI es propia, para
+   que las dos pestanas no intenten mandar el mismo pendiente al mismo tiempo. */
+const TOKEN_KEY = "ticketflow.token";
+const USER_KEY  = "ticketflow.user";
+const THEME_KEY = "ticketflow.theme";
+const COLA_KEY  = "ticketflow.movil.cola";
+
+/* Tiene que coincidir con CATEGORIA_MANTENIMIENTO del backend. Es el valor
+   guardado en la planilla, en ingles; lo que se muestra es la etiqueta. */
+const CATEGORIA = "Maintenance & Repairs";
+
+const PRIORIDADES = [
+  {id:"urgent", label:"Urgente", days:2},
+  {id:"high",   label:"Alta",    days:5},
+  {id:"medium", label:"Media",   days:10},
+  {id:"low",    label:"Baja",    days:21}
+];
+const ESTADOS = [
+  {id:"open",     label:"Abierto"},
+  {id:"progress", label:"En curso"},
+  {id:"resolved", label:"Resuelto"}
+];
+const VISTAS = [
+  {id:"pend",     label:"Pendientes", test:t=>t.status!=="resolved"},
+  {id:"open",     label:"Abiertos",   test:t=>t.status==="open"},
+  {id:"progress", label:"En curso",   test:t=>t.status==="progress"},
+  {id:"resolved", label:"Resueltos",  test:t=>t.status==="resolved"},
+  {id:"todos",    label:"Todos",      test:()=>true}
+];
+
+const $  = s => document.querySelector(s);
+const $$ = s => Array.prototype.slice.call(document.querySelectorAll(s));
+const pri = id => PRIORIDADES.find(p=>p.id===id) || PRIORIDADES[2];
+const est = id => ESTADOS.find(e=>e.id===id) || ESTADOS[0];
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+let yo = null;
+let tickets = [];
+let stamp = "0";
+let sincronizando = false;
+let colaTimer = null;
+let pollTimer = null;
+let ui = { vista:"pend", edificio:"all", abierto:null };
+
+/* ============================================================
+   API
+   ============================================================ */
+/* text/plain a proposito: con application/json el navegador manda un preflight
+   OPTIONS que los web apps de Apps Script no contestan, y la llamada muere por
+   CORS. redirect:"follow" tambien hace falta (Apps Script responde un 302). */
+async function api(action, payload){
+  const body = Object.assign({action:action}, payload||{});
+  if(action!=="login" && action!=="ping") body.token = localStorage.getItem(TOKEN_KEY)||"";
+  let res;
+  try{
+    res = await fetch(API_URL, {
+      method:"POST", redirect:"follow",
+      headers:{"Content-Type":"text/plain;charset=utf-8"},
+      body:JSON.stringify(body)
+    });
+  }catch(e){ throw new Error("offline"); }
+  let d;
+  try{ d = await res.json(); }catch(e){ throw new Error("Respuesta inválida del servidor"); }
+  if(!d.ok && (d.error==="NO_AUTH" || d.error==="SESION_EXPIRADA")){
+    localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY);
+    mostrarGate("Tu sesión venció. Ingresá de nuevo.");
+    throw new Error("sesion");
+  }
+  if(!d.ok){
+    const err = new Error(d.error||"Error del servidor");
+    err.detalle = d;
+    throw err;
+  }
+  return d;
+}
+
+/* ============================================================
+   COLA DE ESCRITURA
+   Guarda la INTENCION (que campos cambiaron, que nota se agrego), no el ticket
+   entero. Asi, si alguien de la oficina guardo primero, se puede reaplicar el
+   cambio sobre la version del servidor en vez de pisarla.
+   ============================================================ */
+function colaGet(){ try{ return JSON.parse(localStorage.getItem(COLA_KEY)||"{}"); }catch(e){ return {}; } }
+function colaSet(q){ try{ localStorage.setItem(COLA_KEY, JSON.stringify(q)); }catch(e){} }
+function colaN(){ return Object.keys(colaGet()).length; }
+
+function sync(estado){
+  const el = $("#sync"); if(!el) return;
+  const p = colaN();
+  const txt = {ok:"", saving:"Guardando…", pending:"Pendiente ("+p+")", off:"Sin conexión ("+p+")"};
+  el.dataset.s = estado;
+  el.querySelector(".lbl").textContent = txt[estado]||"";
+}
+
+/** Encola un cambio sobre un ticket existente. */
+function encolarCambio(id, campos, nota){
+  const q = colaGet();
+  const prev = q[id] || {campos:{}, notas:[]};
+  q[id] = {
+    campos: Object.assign({}, prev.campos, campos||{}),
+    notas:  prev.notas.concat(nota ? [nota] : [])
+  };
+  colaSet(q);
+  sync("saving");
+  clearTimeout(colaTimer);
+  colaTimer = setTimeout(vaciarCola, 400);
+}
+
+/** Encola un ticket nuevo entero (todavia no existe del lado del servidor). */
+function encolarNuevo(t){
+  const q = colaGet();
+  q[t.id] = {nuevo:t};
+  colaSet(q);
+  sync("saving");
+  clearTimeout(colaTimer);
+  colaTimer = setTimeout(vaciarCola, 200);
+}
+
+/** Aplica una intencion sobre una copia de un ticket y devuelve el resultado. */
+function aplicar(base, item){
+  const t = JSON.parse(JSON.stringify(base));
+  Object.keys(item.campos||{}).forEach(k=>{ t[k] = item.campos[k]; });
+  if(t.status === "resolved"){ if(!t.resolvedAt) t.resolvedAt = hoyISO(); }
+  else delete t.resolvedAt;
+  t.notes = (t.notes||[]).concat(item.notas||[]);
+  return t;
+}
+
+async function vaciarCola(){
+  if(sincronizando) return;
+  sincronizando = true;
+  try{
+    const ids = Object.keys(colaGet());
+    for(let i=0;i<ids.length;i++){
+      const id = ids[i];
+      const item = colaGet()[id];
+      if(!item) continue;
+      try{
+        let d;
+        if(item.nuevo){
+          d = await api("guardar", {ticket:item.nuevo});
+          const local = tickets.find(x=>x.id===id);
+          if(local){ local.id = d.id; local.updated_at = d.updated_at||""; }
+          if(ui.abierto === id) ui.abierto = d.id;
+        }else{
+          const local = tickets.find(x=>x.id===id);
+          if(!local){ const q=colaGet(); delete q[id]; colaSet(q); continue; }
+          try{
+            d = await api("guardar", {ticket:aplicar(local,item), base:local.updated_at||""});
+          }catch(err){
+            if(err.message !== "CONFLICTO") throw err;
+            /* Alguien de la oficina guardo primero. En vez de pisarlo, reaplico
+               mi cambio sobre SU version y reintento una sola vez. Un cambio de
+               estado gana el ultimo que guarda; una nota nunca se pierde. */
+            const srv = (err.detalle && err.detalle.servidor) || null;
+            if(!srv) throw err;
+            d = await api("guardar", {ticket:aplicar(srv,item), base:srv.updated_at||""});
+            aviso("Se combinó con el cambio de "+((err.detalle&&err.detalle.por)||"la oficina"));
+          }
+          const l2 = tickets.find(x=>x.id===id);
+          if(l2 && d.updated_at) l2.updated_at = d.updated_at;
+        }
+        stamp = d.stamp || stamp;
+        const q = colaGet(); delete q[id]; colaSet(q);
+      }catch(e){
+        if(e.message === "sesion") return;
+        sync(e.message==="offline" ? "off" : "pending");
+        setTimeout(vaciarCola, 10000);
+        return;
+      }
+    }
+    sync("ok");
+    try{
+      await traer();
+      render();
+      if(ui.abierto) abrirDetalle(ui.abierto, true);
+    }catch(e){ if(e.message==="offline") sync("off"); }
+  } finally { sincronizando = false; }
+}
+
+/* ============================================================
+   LECTURA
+   ============================================================ */
+async function traer(){
+  const d = await api("listar");
+  stamp = d.stamp;
+  /* El servidor ya acota a mantenimiento si el rol es `mantenimiento`. Para un
+     admin u operador que abre esta pagina, el recorte lo hace el cliente: la
+     idea es la vista, no el permiso. */
+  tickets = (d.tickets||[])
+    .filter(t => String(t.category||"") === CATEGORIA)
+    .map(t => { if(!t.notes) t.notes = []; return t; });
+}
+
+function editando(){
+  const a = document.activeElement;
+  return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
+}
+
+async function poll(){
+  if(document.hidden || !localStorage.getItem(TOKEN_KEY)) return;
+  try{
+    const d = await api("version");
+    if(d.stamp !== stamp && !colaN() && !sincronizando && !editando()){
+      await traer();
+      render();
+      if(ui.abierto) abrirDetalle(ui.abierto, true);
+    }
+    sync(colaN() ? "pending" : "ok");
+  }catch(e){
+    if(e.message === "offline") sync("off");
+  }
+}
+function programarPoll(){
+  clearInterval(pollTimer);
+  pollTimer = setInterval(poll, 60000);
+}
+
+/* ============================================================
+   FECHAS
+   ============================================================ */
+function hoyISO(){ const t=new Date(); t.setHours(12,0,0,0); return t.toISOString().slice(0,10); }
+function dias(iso){
+  const a=new Date(String(iso).slice(0,10)+"T12:00:00"); const b=new Date(); b.setHours(12,0,0,0);
+  return Math.max(0, Math.round((b-a)/86400000));
+}
+function etiquetaDias(n){ return n===0?"Hoy":(n===1?"1 día":n+" días"); }
+function fmtFecha(iso){
+  const d = new Date(String(iso).length>10?iso:String(iso)+"T12:00:00");
+  return isNaN(d) ? String(iso) : d.toLocaleDateString("es-AR",{day:"numeric",month:"short",year:"numeric"});
+}
+function atrasado(t){ return t.status!=="resolved" && dias(t.submitted) > pri(t.priority).days; }
+function edificioDe(t){
+  const loc = String(t.location||"").trim();
+  if(!loc) return "Sin especificar";
+  const corte = loc.indexOf("—") >= 0 ? loc.indexOf("—") : loc.indexOf(" - ");
+  return (corte >= 0 ? loc.slice(0,corte) : loc).trim() || "Sin especificar";
+}
+function edificios(){
+  const s={}; tickets.forEach(t=>{ s[edificioDe(t)]=1; });
+  return Object.keys(s).sort();
+}
+
+/* ============================================================
+   RENDER
+   ============================================================ */
+function vistaDe(id){ return VISTAS.find(v=>v.id===id) || VISTAS[0]; }
+
+function visibles(){
+  const v = vistaDe(ui.vista);
+  return tickets
+    .filter(t => v.test(t))
+    .filter(t => ui.edificio==="all" || edificioDe(t)===ui.edificio)
+    .sort((a,b)=>{
+      const ra = a.status==="resolved"?1:0, rb = b.status==="resolved"?1:0;
+      if(ra!==rb) return ra-rb;                       /* resueltos al final */
+      const pa = PRIORIDADES.findIndex(p=>p.id===a.priority);
+      const pb = PRIORIDADES.findIndex(p=>p.id===b.priority);
+      if(pa!==pb) return pa-pb;                        /* mas urgente arriba */
+      return dias(b.submitted)-dias(a.submitted);      /* mas viejo arriba */
+    });
+}
+
+function contar(vid){
+  const v = vistaDe(vid);
+  return tickets.filter(t=>v.test(t))
+                .filter(t=>ui.edificio==="all" || edificioDe(t)===ui.edificio).length;
+}
+
+function renderChips(){
+  $("#chips").innerHTML = VISTAS.map(v =>
+    '<button class="chip'+(ui.vista===v.id?" on":"")+'" data-v="'+v.id+'">'
+    + esc(v.label) + '<b>' + contar(v.id) + '</b></button>'
+  ).join("");
+}
+
+function renderBld(){
+  const lista = edificios();
+  const sel = $("#bldSel");
+  sel.innerHTML = '<option value="all">Todos los edificios ('+tickets.length+')</option>'
+    + lista.map(b=>{
+        const n = tickets.filter(t=>edificioDe(t)===b).length;
+        return '<option value="'+esc(b)+'"'+(ui.edificio===b?" selected":"")+'>'+esc(b)+' ('+n+')</option>';
+      }).join("");
+  sel.classList.toggle("on", ui.edificio!=="all");
+}
+
+function renderLista(){
+  const lista = visibles();
+  $("#list").innerHTML = lista.length ? lista.map(function(t){
+    const d = dias(t.submitted);
+    const tarde = atrasado(t);
+    const n = (t.notes||[]).length;
+    return '<button class="card" data-id="'+esc(t.id)+'">'
+      + '<div class="r1"><span class="loc">'+esc(t.location||t.id)+'</span>'
+      + '<span class="age'+(tarde?" late":"")+'">'+(t.status==="resolved"?"Resuelto":etiquetaDias(d))+'</span></div>'
+      + (t.customer?'<div class="nm">'+esc(t.customer)+'</div>':'')
+      + '<div class="snip">'+esc(t.description||"Sin descripción.")+'</div>'
+      + '<div class="r2">'
+      +   '<span class="tag '+t.status+'">'+est(t.status).label+'</span>'
+      +   '<span class="pr '+t.priority+'">'+pri(t.priority).label+'</span>'
+      +   (n?'<span class="notecount">'+n+(n===1?" nota":" notas")+'</span>':'')
+      + '</div></button>';
+  }).join("") : '<div class="empty">No hay reclamos de mantenimiento en esta vista.</div>';
+}
+
+function render(){
+  renderChips();
+  renderBld();
+  renderLista();
+}
+
+/* ============================================================
+   DETALLE
+   ============================================================ */
+function abrirDetalle(id, silencioso){
+  const t = tickets.find(x=>x.id===id);
+  if(!t){ cerrarDetalle(); return; }
+  ui.abierto = id;
+
+  const d = dias(t.submitted);
+  const tarde = atrasado(t);
+  const notas = (t.notes||[]).slice().sort((a,b)=> String(a.at)<String(b.at)?-1:1);
+
+  let h = '';
+  h += '<div class="block"><div class="facts">'
+     + '<div class="fact"><div class="k">Ingresado</div><div class="v">'+fmtFecha(t.submitted)+'</div></div>'
+     + '<div class="fact"><div class="k">'+(t.status==="resolved"?"Estado":"Abierto hace")+'</div>'
+     + '<div class="v'+(tarde?" warn":"")+'">'+(t.status==="resolved"?"Resuelto":etiquetaDias(d))+'</div></div>'
+     + '<div class="fact"><div class="k">Prioridad</div><div class="v">'+pri(t.priority).label+'</div></div>'
+     + (t.assignee?'<div class="fact"><div class="k">A cargo de</div><div class="v">'+esc(t.assignee)+'</div></div>':'')
+     + '</div></div>';
+
+  h += '<div class="block"><h3>El reclamo</h3>'
+     + '<div class="desc">'+esc(t.description||"Sin descripción.")+'</div>';
+  if(t.customer || t.phone || t.email){
+    h += '<div class="facts" style="margin-top:12px">'
+       + (t.customer?'<div class="fact"><div class="k">Reportó</div><div class="v">'+esc(t.customer)+'</div></div>':'')
+       + '</div>';
+  }
+  if(t.phone || t.email){
+    h += '<div class="contacto">'
+       + (t.phone?'<a href="tel:'+esc(String(t.phone).replace(/[^+\d]/g,""))+'">'
+          + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16.9v2.6a1.7 1.7 0 0 1-1.9 1.7 17 17 0 0 1-7.4-2.6 16.7 16.7 0 0 1-5.1-5.1A17 17 0 0 1 4 6.1 1.7 1.7 0 0 1 5.7 4.2h2.6a1.7 1.7 0 0 1 1.7 1.5c.1.8.3 1.6.6 2.4a1.7 1.7 0 0 1-.4 1.8l-1.1 1.1a13.6 13.6 0 0 0 5.1 5.1l1.1-1.1a1.7 1.7 0 0 1 1.8-.4c.8.3 1.6.5 2.4.6a1.7 1.7 0 0 1 1.5 1.7z"/></svg>Llamar</a>':'')
+       + (t.email?'<a href="mailto:'+esc(t.email)+'">'
+          + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3.5 7 8.5 6 8.5-6"/></svg>Email</a>':'')
+       + '</div>';
+  }
+  h += '</div>';
+
+  h += '<div class="block"><h3>Estado</h3><div class="states">'
+     + ESTADOS.map(e=>'<button class="state'+(t.status===e.id?" on":"")+'" data-st="'+e.id+'">'+e.label+'</button>').join("")
+     + '</div></div>';
+
+  h += '<div class="block"><h3>Notas de seguimiento</h3>';
+  h += notas.length
+    ? notas.map(nn=>'<div class="note"><time>'+fmtFecha(nn.at)+(nn.by?' · <span class="by">'+esc(nn.by)+'</span>':'')+'</time>'
+        + '<p>'+esc(nn.text)+'</p></div>').join("")
+    : '<div style="color:var(--text-3);font-size:14px">Todavía no hay notas.</div>';
+  h += '<div style="margin-top:12px">'
+     + '<textarea class="inp" id="dNota" placeholder="Qué hiciste, a quién llamaste, qué falta…" style="min-height:88px"></textarea>'
+     + '<button class="btn wide" id="dAddNota" style="margin-top:10px;width:100%">Agregar nota</button>'
+     + '</div></div>';
+
+  $("#dTitle").textContent = t.location || t.id;
+  $("#dBody").innerHTML = h;
+  if(!silencioso) $("#dBody").scrollTop = 0;
+
+  $$("#dBody .state").forEach(b=>{
+    b.addEventListener("click", function(){
+      const a = tickets.find(x=>x.id===ui.abierto);
+      if(!a || a.status === b.dataset.st) return;
+      a.status = b.dataset.st;
+      if(a.status==="resolved"){ if(!a.resolvedAt) a.resolvedAt = hoyISO(); }
+      else delete a.resolvedAt;
+      encolarCambio(a.id, {status:a.status});
+      abrirDetalle(a.id, true);
+      renderChips(); renderLista();
+      aviso("Estado: "+est(a.status).label.toLowerCase());
+    });
+  });
+
+  $("#dAddNota").addEventListener("click", function(){
+    const caja = $("#dNota");
+    const txt = caja.value.trim();
+    if(!txt){ caja.focus(); return; }
+    const a = tickets.find(x=>x.id===ui.abierto);
+    if(!a) return;
+    const nota = {at:new Date().toISOString(), text:txt, by:(yo&&yo.nombre)||""};
+    a.notes = (a.notes||[]).concat([nota]);
+    encolarCambio(a.id, null, nota);
+    abrirDetalle(a.id, true);
+    renderLista();
+    aviso("Nota agregada");
+  });
+
+  $("#detalle").classList.add("on");
+}
+function cerrarDetalle(){
+  ui.abierto = null;
+  $("#detalle").classList.remove("on");
+}
+
+/* ============================================================
+   ALTA
+   ============================================================ */
+function abrirAlta(){
+  $("#aPri").innerHTML = PRIORIDADES.map(p=>
+    '<option value="'+p.id+'"'+(p.id==="medium"?" selected":"")+'>'+p.label+'</option>').join("");
+  ["#aLoc","#aDesc","#aCust","#aPhone"].forEach(s=>{ $(s).value=""; });
+  $("#alta").classList.add("on");
+  setTimeout(()=>$("#aLoc").focus(), 250);
+}
+function cerrarAlta(){ $("#alta").classList.remove("on"); }
+
+function crear(){
+  const loc  = $("#aLoc").value.trim();
+  const desc = $("#aDesc").value.trim();
+  if(!loc){ $("#aLoc").focus(); aviso("Poné el edificio y la unidad"); return; }
+  if(!desc){ $("#aDesc").focus(); aviso("Contá qué pasó"); return; }
+
+  /* Id provisional: el definitivo lo asigna el servidor, asi dos personas
+     cargando a la vez no terminan con el mismo numero. */
+  const t = {
+    id:"TMP-"+Date.now()+"-"+Math.floor(Math.random()*1000),
+    customer:$("#aCust").value.trim() || (yo&&yo.nombre) || "",
+    email:"", phone:$("#aPhone").value.trim(),
+    location:loc, category:CATEGORIA, submitted:hoyISO(),
+    status:"open", priority:$("#aPri").value,
+    assignee:"", description:desc, notes:[], updated_at:""
+  };
+  tickets.push(t);
+  ui.vista = "pend"; ui.edificio = "all";
+  cerrarAlta();
+  render();
+  encolarNuevo(t);
+  aviso("Reclamo cargado");
+}
+
+/* ============================================================
+   SESION
+   ============================================================ */
+function mostrarGate(msg){
+  clearInterval(pollTimer);
+  $("#gate").classList.add("on");
+  $("#gMsg").textContent = msg||"";
+  $("#gPass").value = "";
+  setTimeout(()=>{ ($("#gUser").value ? $("#gPass") : $("#gUser")).focus(); }, 100);
+}
+function ocultarGate(){ $("#gate").classList.remove("on"); }
+
+async function entrar(){
+  const b = $("#gBtn");
+  const usuario = $("#gUser").value.trim();
+  const clave   = $("#gPass").value;
+  if(!usuario || !clave){ $("#gMsg").textContent = "Completá usuario y contraseña."; return; }
+  b.disabled = true; b.textContent = "Ingresando…"; $("#gMsg").textContent = "";
+  try{
+    const d = await api("login", {usuario:usuario, password:clave});
+    localStorage.setItem(TOKEN_KEY, d.token);
+    localStorage.setItem(USER_KEY, JSON.stringify(d.user));
+    yo = d.user;
+    ocultarGate();
+    await arrancar();
+  }catch(e){
+    $("#gMsg").textContent = e.message==="offline" ? "Sin conexión con el servidor." : e.message;
+  }finally{
+    b.disabled = false; b.textContent = "Ingresar";
+  }
+}
+
+async function salir(){
+  if(colaN() && !confirm("Quedan cambios sin enviar. ¿Salir igual?")) return;
+  try{ await api("logout"); }catch(e){}
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+  yo = null; tickets = []; ui.abierto = null;
+  cerrarDetalle(); cerrarAlta(); render();
+  mostrarGate("");
+}
+
+/* ============================================================
+   VARIOS
+   ============================================================ */
+let avisoTimer;
+function aviso(msg){
+  const el = $("#toast"); el.textContent = msg; el.classList.add("on");
+  clearTimeout(avisoTimer); avisoTimer = setTimeout(()=>el.classList.remove("on"), 2200);
+}
+
+function tema(modo){
+  const m = modo || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  document.documentElement.setAttribute("data-theme", m);
+  $("#themeIcon").innerHTML = m==="dark"
+    ? '<circle cx="12" cy="12" r="4.2"/><path d="M12 3v2M12 19v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M3 12h2M19 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/>'
+    : '<path d="M20 14.5A8.2 8.2 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z"/>';
+}
+
+/* ============================================================
+   EVENTOS
+   ============================================================ */
+$("#chips").addEventListener("click", function(e){
+  const b = e.target.closest("button[data-v]");
+  if(!b) return;
+  ui.vista = b.dataset.v;
+  render();
+  $("#list").scrollTop = 0;
+});
+$("#bldSel").addEventListener("change", function(){ ui.edificio = this.value; render(); $("#list").scrollTop = 0; });
+$("#list").addEventListener("click", function(e){
+  const b = e.target.closest(".card[data-id]");
+  if(b) abrirDetalle(b.dataset.id);
+});
+$("#dBack").addEventListener("click", cerrarDetalle);
+$("#newBtn").addEventListener("click", abrirAlta);
+$("#aBack").addEventListener("click", cerrarAlta);
+$("#aSave").addEventListener("click", crear);
+$("#outBtn").addEventListener("click", salir);
+$("#gBtn").addEventListener("click", entrar);
+$("#gate").addEventListener("keydown", function(e){ if(e.key==="Enter") entrar(); });
+$("#themeBtn").addEventListener("click", function(){
+  const sig = document.documentElement.getAttribute("data-theme")==="dark" ? "light" : "dark";
+  try{ localStorage.setItem(THEME_KEY, sig); }catch(e){}
+  tema(sig);
+});
+
+/* El boton "atras" del telefono cierra el panel abierto en vez de salir de la app. */
+window.addEventListener("popstate", function(){
+  if($("#alta").classList.contains("on")){ cerrarAlta(); history.pushState(null,""); return; }
+  if($("#detalle").classList.contains("on")){ cerrarDetalle(); history.pushState(null,""); return; }
+});
+
+window.addEventListener("online",  function(){ sync("saving"); vaciarCola(); });
+window.addEventListener("offline", function(){ sync("off"); });
+document.addEventListener("visibilitychange", function(){
+  if(!document.hidden && localStorage.getItem(TOKEN_KEY)){ poll(); if(colaN()) vaciarCola(); }
+});
+
+/* ============================================================
+   ARRANQUE
+   ============================================================ */
+async function arrancar(){
+  try{
+    await traer();
+  }catch(e){
+    if(e.message === "sesion") return;
+    sync("off");
+    aviso("No se pudieron traer los reclamos");
+    return;
+  }
+  render();
+  sync(colaN() ? "pending" : "ok");
+  if(colaN()) vaciarCola();
+  programarPoll();
+  history.pushState(null,"");
+}
+
+let temaGuardado = null;
+try{ temaGuardado = localStorage.getItem(THEME_KEY); }catch(e){}
+tema(temaGuardado);
+
+(function(){
+  let guardado = null;
+  try{ guardado = JSON.parse(localStorage.getItem(USER_KEY)||"null"); }catch(e){}
+  if(localStorage.getItem(TOKEN_KEY) && guardado){
+    yo = guardado;
+    ocultarGate();
+    arrancar();
+  }else{
+    mostrarGate("");
+  }
+})();
+
+})();
+</script>
+</body>
+</html>
