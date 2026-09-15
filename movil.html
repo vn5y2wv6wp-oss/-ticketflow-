@@ -125,7 +125,11 @@ button{cursor:pointer;background:none;border:none;padding:0;}
 .card .loc{font-weight:650;font-size:15.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .card .age{font-size:12px;color:var(--text-3);flex:none;}
 .card .age.late{color:var(--alert);font-weight:600;}
+.card .tit{font-size:14px;font-weight:600;color:var(--text-1);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .card .nm{font-size:13px;color:var(--text-2);margin-top:1px;}
+.tituloRec{font-size:17px;font-weight:650;line-height:1.3;margin-bottom:12px;}
+.hint{font-size:13px;color:var(--text-3);margin:-8px 0 14px;}
+.hint b{color:var(--text-2);font-weight:600;}
 .card .snip{
   font-size:13.5px;color:var(--text-2);margin-top:7px;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
@@ -213,7 +217,8 @@ label.f{display:block;font-size:12.5px;color:var(--text-2);margin:0 0 5px;font-w
 }
 .inp:focus{border-color:var(--accent);outline:none;}
 textarea.inp{min-height:110px;resize:vertical;}
-select.inp{appearance:none;}
+select.inp{appearance:none;-webkit-appearance:none;cursor:pointer;padding-right:36px;
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%239a9aa0' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 13px center;background-size:14px;}
 .fld{margin-bottom:14px;}
 
 .btn{
@@ -303,13 +308,18 @@ select.inp{appearance:none;}
   </div>
   <div class="sheet-body">
     <div class="fld">
-      <label class="f" for="aLoc">Edificio / unidad</label>
-      <input class="inp" id="aLoc" placeholder="ej. Belgrano 1450 — 3A" autocomplete="off">
+      <label class="f" for="aBld">Edificio</label>
+      <select class="inp" id="aBld"></select>
+    </div>
+    <div class="fld">
+      <label class="f" for="aUnit">Unidad</label>
+      <input class="inp" id="aUnit" placeholder="ej. 3A" autocomplete="off">
     </div>
     <div class="fld">
       <label class="f" for="aDesc">¿Qué pasó?</label>
       <textarea class="inp" id="aDesc" placeholder="Describí el problema: qué falla, desde cuándo, dónde exactamente…"></textarea>
     </div>
+    <div class="hint" id="aHint">Título: <b>se arma solo con lo que escribas</b></div>
     <div class="fld">
       <label class="f" for="aPri">Prioridad</label>
       <select class="inp" id="aPri"></select>
@@ -549,6 +559,7 @@ async function vaciarCola(){
 async function traer(){
   const d = await api("listar");
   stamp = d.stamp;
+  if(d.edificios && d.edificios.length) edificiosSrv = d.edificios;
   /* El servidor ya acota a mantenimiento si el rol es `mantenimiento`. Para un
      admin u operador que abre esta pagina, el recorte lo hace el cliente: la
      idea es la vista, no el permiso. */
@@ -595,12 +606,107 @@ function fmtFecha(iso){
   return isNaN(d) ? String(iso) : d.toLocaleDateString("es-AR",{day:"numeric",month:"short",year:"numeric"});
 }
 function atrasado(t){ return t.status!=="resolved" && dias(t.submitted) > pri(t.priority).days; }
-function edificioDe(t){
-  const loc = String(t.location||"").trim();
-  if(!loc) return "Sin especificar";
-  const corte = loc.indexOf("—") >= 0 ? loc.indexOf("—") : loc.indexOf(" - ");
-  return (corte >= 0 ? loc.slice(0,corte) : loc).trim() || "Sin especificar";
+
+/* ================= edificios, unidad y titulo =================
+   Padron de respaldo. La lista de verdad sale de la hoja `Edificios` de la
+   planilla y llega con cada `listar`; esto es lo que se usa si todavia no
+   corriste actualizar() en el backend, o si la hoja quedo vacia.            */
+const EDIFICIOS_FIJOS = [
+  "ALBARELLOS 160","ALEM 135","ALEM 175","ALTOS DE LA MERCED","ANCHORENA 1720",
+  "ARENALES 2645","AVELLANEDA 350","AYACUCHO 1466","CONSTITUCION 2889",
+  "DIEGO PALMA 232","ELCANO 2845","ESPA\u00d1A 385","ITUZAINGO 119","JARAMILLO 1838",
+  "LIBERTADOR 13131","MANUELA PEDRAZA 1770","MARTIN Y OMAR 132","PERON 3050",
+  "QUARTIER POLO","RIVADAVIA 27","URQUIZA 1661"
+];
+let edificiosSrv = [];                     /* lo ultimo que mando el servidor */
+
+/* Para los desplegables de alta y de edicion: el padron, mas el edificio que
+   ya tenga el ticket que estoy editando (para no perderlo si es uno viejo). */
+function listaEdificios(extra){
+  const s = {};
+  (edificiosSrv.length ? edificiosSrv : EDIFICIOS_FIJOS).forEach(function(b){ if(b) s[b]=1; });
+  if(extra) s[extra] = 1;
+  return Object.keys(s).sort(function(a,b){ return a.localeCompare(b,"es"); });
 }
+
+/* "ALEM 135 \u2014 3A" -> {edificio:"ALEM 135", unidad:"3A"}
+   Sirve tambien para lo cargado a mano antes, con guion o sin separador.   */
+function partirLoc(loc){
+  const s = String(loc==null?"":loc).trim();
+  if(!s) return {edificio:"", unidad:""};
+  let i = s.search(/[\u2014\u2013]/), largo = 1;
+  if(i < 0){ i = s.indexOf(" - "); largo = 3; }
+  if(i < 0) return {edificio:s, unidad:""};
+  return {edificio:s.slice(0,i).trim(), unidad:s.slice(i+largo).trim()};
+}
+function armarLoc(ed, un){
+  ed = String(ed==null?"":ed).trim();
+  un = String(un==null?"":un).trim();
+  return un ? (ed + " \u2014 " + un) : ed;
+}
+function optsEdificio(elegido){
+  return '<option value="">\u2014 Eleg\u00ed el edificio \u2014</option>'
+    + listaEdificios(elegido).map(function(b){
+        return '<option value="'+esc(b)+'"'+(b===elegido?" selected":"")+'>'+esc(b)+'</option>';
+      }).join("");
+}
+
+/* ---- titulo automatico ----
+   Diccionario de palabras clave: gana la primera regla que matchea, y las mas
+   urgentes o especificas estan primero. Si no matchea ninguna, resume la
+   primera frase del reclamo.
+
+   OJO: esta tabla esta repetida, identica, en Codigo.gs, TicketFlow.html y
+   movil.html. Si tocas una regla, tocala en los tres. El texto se compara en
+   minusculas y sin acentos (normTxt), por eso las reglas van sin acentos.   */
+function normTxt(s){
+  return String(s==null?"":s).toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+const REGLAS_TITULO = [
+  [/olor a gas|escape de gas|fuga de gas|perdida de gas|\bgas\b/, "P\u00e9rdida de gas"],
+  [/incendio|matafuego|extintor|\bhumo\b/,                        "Incendio / matafuegos"],
+  [/ascensor|montacarga|elevador/,                                "Ascensor"],
+  [/agua caliente|caldera|termotanque|calefacc|radiador/,          "Agua caliente / caldera"],
+  [/filtrac|gotera|gotea|se llueve|infiltra|perdida de agua|se moja|chorrea/, "Filtraci\u00f3n de agua"],
+  [/humedad|moho|hongo/,                                          "Humedad"],
+  [/sin agua|falta de agua|no hay agua|presion de agua|tanque|\bbomba|cisterna/, "Falta de agua"],
+  [/cloaca|desagu|desagot|tapad|destap|rejilla|pluvial|inodoro|\bcano|caneria|desborde/, "Desag\u00fce tapado"],
+  [/portero|timbre|intercomunicador|citofono/,                    "Portero el\u00e9ctrico"],
+  [/\bluz\b|\bluces|lampara|\bfoco|iluminac|electric|\btablero|disyuntor|termica|cortocircuito|apagon|enchufe/, "Problema el\u00e9ctrico"],
+  [/cerradura|cerrajer|\bllave|porton|puerta|picaporte|bisagra/,   "Puerta / cerradura"],
+  [/vidrio|ventana|persiana|abertura|mosquitero/,                 "Vidrios / aberturas"],
+  [/plaga|cucaracha|\brata|\braton|fumigac|paloma|insecto|hormiga|termita/, "Plagas"],
+  [/camara|seguridad|\brobo|hurto|vandalismo|intruso|\breja/,      "Seguridad"],
+  [/basura|residuo|suciedad|limpieza|\bsucio|mugre|\bolor/,        "Limpieza"],
+  [/ruido|musica|fiesta|griter|\bobra\b|martill|taladr/,           "Ruidos molestos"],
+  [/grieta|rajadura|revoque|mamposter|pintura|pintar|cielorraso|\btecho|desprend|azulejo/, "Pintura / alba\u00f1iler\u00eda"],
+  [/expensa|deuda|recibo|liquidac|\bpago|\bcuota|interes|moroso/,   "Expensas"],
+  [/\bsplit|aire acondicionado|climatiz|ventilac|extractor/,       "Climatizaci\u00f3n"],
+  [/cochera|garage|garaje|estacionamiento/,                       "Cochera"],
+  [/palier|\bhall\b|terraza|azotea|\bpatio|\bsum\b|pileta|laundry/, "Espacio com\u00fan"],
+  [/antena|\bcable|internet|wifi|fibra optica/,                   "Antena / cableado"],
+  [/poliza|seguro del|siniestro/,                                 "Seguro del edificio"],
+  [/mascota|\bperro|\bgato/,                                      "Convivencia / mascotas"]
+];
+function tituloAuto(desc){
+  const texto = String(desc==null?"":desc).replace(/\s+/g," ").trim();
+  if(!texto) return "Reclamo sin descripci\u00f3n";
+  const n = normTxt(texto);
+  for(let i=0;i<REGLAS_TITULO.length;i++){
+    if(REGLAS_TITULO[i][0].test(n)) return REGLAS_TITULO[i][1];
+  }
+  const frase = (texto.split(/[.;\n]/)[0] || texto).trim();
+  const palabras = frase.split(" ");
+  const corto = palabras.slice(0,7).join(" ").replace(/[,:;\-\u2013\u2014]+$/,"");
+  return corto.charAt(0).toUpperCase() + corto.slice(1) + (palabras.length>7 ? "\u2026" : "");
+}
+/* El titulo guardado manda; si el ticket es viejo y no tiene, se deriva. */
+function tituloDe(t){
+  return String(t.titulo==null?"":t.titulo).trim() || tituloAuto(t.description);
+}
+
+function edificioDe(t){ return partirLoc(t.location).edificio || "Sin especificar"; }
 function edificios(){
   const s={}; tickets.forEach(t=>{ s[edificioDe(t)]=1; });
   return Object.keys(s).sort();
@@ -659,6 +765,7 @@ function renderLista(){
     return '<button class="card" data-id="'+esc(t.id)+'">'
       + '<div class="r1"><span class="loc">'+esc(t.location||t.id)+'</span>'
       + '<span class="age'+(tarde?" late":"")+'">'+(t.status==="resolved"?"Resuelto":etiquetaDias(d))+'</span></div>'
+      + '<div class="tit">'+esc(tituloDe(t))+'</div>'
       + (t.customer?'<div class="nm">'+esc(t.customer)+'</div>':'')
       + '<div class="snip">'+esc(t.description||"Sin descripción.")+'</div>'
       + '<div class="r2">'
@@ -688,7 +795,7 @@ function abrirDetalle(id, silencioso){
   const notas = (t.notes||[]).slice().sort((a,b)=> String(a.at)<String(b.at)?-1:1);
 
   let h = '';
-  h += '<div class="block"><div class="facts">'
+  h += '<div class="block"><div class="tituloRec">'+esc(tituloDe(t))+'</div><div class="facts">'
      + '<div class="fact"><div class="k">Ingresado</div><div class="v">'+fmtFecha(t.submitted)+'</div></div>'
      + '<div class="fact"><div class="k">'+(t.status==="resolved"?"Estado":"Abierto hace")+'</div>'
      + '<div class="v'+(tarde?" warn":"")+'">'+(t.status==="resolved"?"Resuelto":etiquetaDias(d))+'</div></div>'
@@ -772,17 +879,22 @@ function cerrarDetalle(){
 function abrirAlta(){
   $("#aPri").innerHTML = PRIORIDADES.map(p=>
     '<option value="'+p.id+'"'+(p.id==="medium"?" selected":"")+'>'+p.label+'</option>').join("");
-  ["#aLoc","#aDesc","#aCust","#aPhone"].forEach(s=>{ $(s).value=""; });
+  $("#aBld").innerHTML = optsEdificio("");
+  ["#aUnit","#aDesc","#aCust","#aPhone"].forEach(s=>{ $(s).value=""; });
+  refrescarHint();
   $("#alta").classList.add("on");
-  setTimeout(()=>$("#aLoc").focus(), 250);
+  setTimeout(()=>$("#aBld").focus(), 250);
 }
 function cerrarAlta(){ $("#alta").classList.remove("on"); }
 
+let creando = false;
 function crear(){
-  const loc  = $("#aLoc").value.trim();
+  if(creando) return;
+  const edif = $("#aBld").value;
   const desc = $("#aDesc").value.trim();
-  if(!loc){ $("#aLoc").focus(); aviso("Poné el edificio y la unidad"); return; }
+  if(!edif){ $("#aBld").focus(); aviso("Elegí el edificio"); return; }
   if(!desc){ $("#aDesc").focus(); aviso("Contá qué pasó"); return; }
+  const loc = armarLoc(edif, $("#aUnit").value);
 
   /* Id provisional: el definitivo lo asigna el servidor, asi dos personas
      cargando a la vez no terminan con el mismo numero. */
@@ -792,8 +904,11 @@ function crear(){
     email:"", phone:$("#aPhone").value.trim(),
     location:loc, category:CATEGORIA, submitted:hoyISO(),
     status:"open", priority:$("#aPri").value,
-    assignee:"", description:desc, notes:[], updated_at:""
+    assignee:"", description:desc, titulo:tituloAuto(desc), notes:[], updated_at:""
   };
+  creando = true;
+  setTimeout(()=>{ creando = false; }, 1500);
+
   tickets.push(t);
   ui.vista = "pend"; ui.edificio = "all";
   cerrarAlta();
@@ -877,6 +992,13 @@ $("#list").addEventListener("click", function(e){
   if(b) abrirDetalle(b.dataset.id);
 });
 $("#dBack").addEventListener("click", cerrarDetalle);
+function refrescarHint(){
+  const d = $("#aDesc").value.trim();
+  $("#aHint").innerHTML = d
+    ? 'T\u00edtulo: <b>' + esc(tituloAuto(d)) + '</b>'
+    : 'T\u00edtulo: <b>se arma solo con lo que escribas</b>';
+}
+$("#aDesc").addEventListener("input", refrescarHint);
 $("#newBtn").addEventListener("click", abrirAlta);
 $("#aBack").addEventListener("click", cerrarAlta);
 $("#aSave").addEventListener("click", crear);
