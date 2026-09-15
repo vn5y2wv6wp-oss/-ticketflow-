@@ -1,2238 +1,933 @@
-<!DOCTYPE html>
-<html lang="es-419">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TicketFlow — Gestion de reclamos</title>
-<style>
-:root{
-  --bg:#f5f5f7;
-  --sidebar:#f0f0f3;
-  --surface:#ffffff;
-  --surface-2:#fafafc;
-  --surface-3:#ececed;
-  --hover:rgba(0,0,0,.045);
-  --text:#1d1d1f;
-  --text-2:#6e6e73;
-  --text-3:#9a9aa0;
-  --line:rgba(0,0,0,.07);
-  --line-2:rgba(0,0,0,.13);
-  --accent:#4b6a8f;                    /* chrome: selection, focus rings */
-  --accent-soft:rgba(75,106,143,.11);
-  /* data colours — kept muted, but far enough apart to tell apart at a glance */
-  --open:#9a6410;
-  --open-soft:rgba(154,100,16,.13);
-  --progress:#2f5ea8;
-  --progress-soft:rgba(47,94,168,.12);
-  --resolved:#1f7a4d;
-  --resolved-soft:rgba(31,122,77,.13);
-  --alert:#b23b2e;
-  --alert-soft:rgba(178,59,46,.11);
-  --shadow-sm:0 1px 2px rgba(0,0,0,.05);
-  --shadow-md:0 1px 3px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.07);
-  --shadow-lg:0 16px 56px rgba(0,0,0,.16);
-  --r:12px;
-  --r-sm:8px;
-  --head-h:52px;
+/**
+ * TicketFlow — Backend (Google Apps Script + Google Sheets)
+ * Estudio Giussani
+ *
+ * Esquema alineado con el modelo real de TicketFlow.html:
+ *   id, customer, email, phone, location, category, submitted,
+ *   status, priority, assignee, description, notes[], resolvedAt
+ *
+ * Despliegue: Implementar > Nueva implementación > Aplicación web
+ *   Ejecutar como: Yo   |   Quién tiene acceso: Cualquier usuario
+ */
+
+// ============================================================
+// CONFIGURACIÓN
+// ============================================================
+
+const CONFIG = {
+  SPREADSHEET_ID: '1oyNGVeViTrVE2haojuy74RUNDjlukUMVR_O8LRy6Q7k/edit?gid=231297048#gid=231297048',
+  TOKEN_HORAS: 12
+};
+
+// `titulo` va al final a proposito: las planillas que ya estan cargadas tienen
+// 16 columnas y agregar la 17 no mueve ningun dato. Corre actualizar() una vez.
+const COLS = [
+  'id', 'customer', 'email', 'phone', 'location', 'category', 'submitted',
+  'status', 'priority', 'assignee', 'description', 'notes', 'resolvedAt',
+  'updated_at', 'updated_by', 'activo', 'titulo'
+];
+
+const COLS_USUARIOS  = ['id', 'usuario', 'nombre', 'rol', 'pass_hash', 'activo', 'token', 'token_exp'];
+const COLS_HISTORIAL = ['fecha', 'ticket_id', 'usuario', 'accion', 'campo', 'antes', 'despues'];
+const COLS_PRESENCIA = ['usuario', 'ticket_id', 'desde', 'latido'];
+const COLS_EDIFICIOS = ['nombre', 'activo'];
+
+// Padron de edificios. Esto es solo la carga inicial de la hoja `Edificios`:
+// despues de correr instalar() / actualizar(), la lista que manda la app sale
+// SIEMPRE de la hoja. Para dar de alta o de baja un edificio se edita la hoja,
+// no este archivo. Poner `activo` en FALSE lo saca del desplegable sin perder
+// los reclamos historicos.
+const EDIFICIOS_SEED = [
+  'ALBARELLOS 160',
+  'ALEM 135',
+  'ALEM 175',
+  'ALTOS DE LA MERCED',
+  'ANCHORENA 1720',
+  'ARENALES 2645',
+  'AVELLANEDA 350',
+  'AYACUCHO 1466',
+  'CONSTITUCION 2889',
+  'DIEGO PALMA 232',
+  'ELCANO 2845',
+  'ESPAÑA 385',
+  'ITUZAINGO 119',
+  'JARAMILLO 1838',
+  'LIBERTADOR 13131',
+  'MANUELA PEDRAZA 1770',
+  'MARTIN Y OMAR 132',
+  'PERON 3050',
+  'QUARTIER POLO',
+  'RIVADAVIA 27',
+  'URQUIZA 1661'
+];
+
+// Un latido mas viejo que esto se considera una pestana muerta.
+const PRESENCIA_TTL_SEG = 75;
+
+// Intentos fallidos antes de bloquear, y cuanto dura el bloqueo.
+const MAX_INTENTOS = 5;
+const BLOQUEO_SEG  = 900;   // 15 minutos
+
+// Largo minimo de la contrasena. El largo es lo que manda; exigir simbolos
+// raros produce contrasenas peores y anotadas en un papel.
+const LARGO_MINIMO = 8;
+
+// Vueltas de SHA-256 al derivar la clave. Encarece el ataque por fuerza bruta
+// sobre la planilla robada. Medi el costo real con medirHash() y bajalo si el
+// login te tarda mas de ~2 segundos.
+const ITERACIONES = 2000;
+
+const PERMISOS = {
+  admin:         ['read', 'write', 'delete', 'admin'],
+  operador:      ['read', 'write', 'delete'],
+  mantenimiento: ['read', 'write'],
+  lectura:       ['read']
+};
+
+// El rol `mantenimiento` solo ve y toca los reclamos de esta categoria. Es el rol
+// de los encargados que entran desde el celular: no tienen por que enterarse de
+// una discusion de expensas ni de un problema de convivencia entre vecinos.
+// El valor es el que esta guardado en la planilla, en ingles: la traduccion vive
+// en el cliente (CAT_LABEL), no aca.
+const CATEGORIA_MANTENIMIENTO = 'Maintenance & Repairs';
+
+/** Categoria a la que esta acotado el usuario, o null si ve todo. */
+function _alcance(user) {
+  return String(user.rol || '').toLowerCase() === 'mantenimiento'
+    ? CATEGORIA_MANTENIMIENTO : null;
 }
-:root[data-theme="dark"]{
-  --bg:#141416;
-  --sidebar:#1a1a1c;
-  --surface:#1f1f22;
-  --surface-2:#252528;
-  --surface-3:#2e2e32;
-  --hover:rgba(255,255,255,.05);
-  --text:#f2f2f5;
-  --text-2:#9e9ea6;
-  --text-3:#72727a;
-  --line:rgba(255,255,255,.08);
-  --line-2:rgba(255,255,255,.15);
-  --accent:#7fa3cc;
-  --accent-soft:rgba(127,163,204,.16);
-  --open:#e3b155;
-  --open-soft:rgba(227,177,85,.16);
-  --progress:#6b9bf5;
-  --progress-soft:rgba(107,155,245,.18);
-  --resolved:#45c98a;
-  --resolved-soft:rgba(69,201,138,.16);
-  --alert:#f0806b;
-  --alert-soft:rgba(240,128,107,.16);
-  --shadow-sm:0 1px 2px rgba(0,0,0,.35);
-  --shadow-md:0 1px 3px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.4);
-  --shadow-lg:0 16px 56px rgba(0,0,0,.65);
-}
-*{box-sizing:border-box;}
-html,body{margin:0;padding:0;height:100%;overflow:hidden;}
-body{
-  background:var(--bg);color:var(--text);
-  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
-  font-size:13.5px;line-height:1.45;-webkit-font-smoothing:antialiased;letter-spacing:-0.01em;
-}
-button,input,select,textarea{font:inherit;color:inherit;letter-spacing:inherit;}
-button{cursor:pointer;background:none;border:none;padding:0;}
-a{color:var(--accent);text-decoration:none;}
-a:hover{text-decoration:underline;}
-::-webkit-scrollbar{width:9px;height:9px;}
-::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:5px;border:2px solid transparent;background-clip:padding-box;}
-::-webkit-scrollbar-thumb:hover{background:var(--text-3);background-clip:padding-box;}
-::-webkit-scrollbar-track{background:transparent;}
-
-/* ================= top bar ================= */
-.topbar{
-  height:var(--head-h);display:flex;align-items:center;gap:10px;padding:0 14px;
-  border-bottom:1px solid var(--line);background:var(--sidebar);
-  position:relative;z-index:30;
-}
-.brand{display:flex;align-items:center;gap:9px;width:214px;flex:none;}
-.mark{
-  width:26px;height:26px;border-radius:7px;flex:none;display:grid;place-items:center;
-  background:linear-gradient(160deg,var(--accent),color-mix(in srgb,var(--accent) 55%,#000 30%));
-  box-shadow:var(--shadow-sm);
-}
-.mark svg{width:14px;height:14px;}
-.brand h1{font-size:14.5px;font-weight:600;margin:0;letter-spacing:-0.02em;}
-.brand em{display:block;font-size:10.5px;color:var(--text-3);font-style:normal;line-height:1.1;letter-spacing:0;}
-
-.search{position:relative;flex:1;max-width:420px;}
-.search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:13px;height:13px;color:var(--text-3);pointer-events:none;}
-.search input{
-  width:100%;height:30px;border-radius:8px;border:1px solid var(--line-2);
-  background:var(--surface);padding:0 11px 0 30px;outline:none;font-size:13px;
-  transition:border-color .15s,box-shadow .15s;
-}
-.search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
-.search input::placeholder{color:var(--text-3);}
-.spacer{flex:1;}
-
-.btn{
-  display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:8px;
-  font-size:12.5px;font-weight:500;border:1px solid var(--line-2);background:var(--surface);color:var(--text);
-  transition:background .15s,transform .1s,border-color .15s;white-space:nowrap;
-}
-.btn:hover{background:var(--surface-3);}
-.btn:active{transform:scale(.97);}
-.btn.primary{background:var(--accent);border-color:transparent;color:#fff;}
-:root[data-theme="dark"] .btn.primary{color:#14191f;}
-.btn.primary:hover{filter:brightness(1.08);background:var(--accent);}
-.btn.icon{width:30px;padding:0;justify-content:center;}
-.btn svg{width:13px;height:13px;}
-.btn.ghost{border-color:transparent;background:transparent;color:var(--text-2);}
-.btn.ghost:hover{background:var(--hover);color:var(--text);}
-
-.menu-wrap{position:relative;}
-.menu{
-  position:absolute;right:0;top:36px;z-index:45;min-width:200px;
-  background:var(--surface);border:1px solid var(--line);border-radius:11px;
-  box-shadow:var(--shadow-md);padding:5px;display:none;
-}
-.menu.on{display:block;}
-.menu button{display:block;width:100%;text-align:left;padding:7px 10px;border-radius:7px;font-size:12.5px;}
-.menu button:hover{background:var(--hover);}
-.menu button.danger{color:var(--alert);}
-.menu hr{border:none;border-top:1px solid var(--line);margin:5px 0;}
-
-/* ================= three panes ================= */
-.app{
-  display:grid;grid-template-columns:214px minmax(0,1fr) minmax(0,1fr);   /* list and detail share the space evenly */
-  grid-template-rows:minmax(0,1fr);           /* keep panes inside the window so they scroll, not overflow */
-  height:calc(100% - var(--head-h));
-}
-.side,.list-pane,.detail,.dash{min-height:0;}
-
-/* ---- pane 1: sidebar ---- */
-.side{background:var(--sidebar);border-right:1px solid var(--line);overflow-y:auto;padding:12px 10px 24px;}
-.side h2{
-  font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;
-  color:var(--text-3);margin:16px 0 5px;padding:0 8px;
-}
-.side h2:first-child{margin-top:2px;}
-.nav{display:flex;align-items:center;gap:9px;width:100%;padding:6px 9px;border-radius:8px;
-  font-size:13px;color:var(--text);text-align:left;transition:background .12s;margin-bottom:1px;}
-.nav:hover{background:var(--hover);}
-.nav.on{background:var(--accent-soft);color:var(--accent);font-weight:550;}
-.nav .ic{width:15px;height:15px;flex:none;opacity:.75;}
-.nav.on .ic{opacity:1;}
-.nav .lbl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.nav .badge{font-size:11.5px;color:var(--text-3);font-variant-numeric:tabular-nums;flex:none;}
-.nav.on .badge{color:var(--accent);}
-.nav.alertv.on{background:var(--alert-soft);color:var(--alert);}
-.nav.alertv.on .badge{color:var(--alert);}
-.swatch{width:8px;height:8px;border-radius:2.5px;flex:none;margin:0 3.5px;}
-.side-sel{
-  width:calc(100% - 18px);margin:1px 9px 2px;height:30px;border-radius:8px;
-  border:1px solid var(--line-2);background:var(--surface);color:var(--text);
-  padding:0 26px 0 10px;font-size:12.5px;outline:none;cursor:pointer;
-  appearance:none;-webkit-appearance:none;text-overflow:ellipsis;
-  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%239a9aa0' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:right 9px center;background-size:11px;
-  transition:border-color .15s,box-shadow .15s;
-}
-.side-sel:hover{border-color:var(--text-3);}
-.side-sel:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
-.side-sel.on{border-color:var(--accent);color:var(--accent);font-weight:600;background-color:var(--accent-soft);}
-
-/* ---- pane 2: list ---- */
-.list-pane{background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0;}
-.list-head{
-  padding:11px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;flex:none;
-  background:var(--surface);
-}
-.list-head .t{font-size:14px;font-weight:600;letter-spacing:-0.015em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.list-head .c{font-size:11.5px;color:var(--text-3);margin-top:1px;}
-select.mini{
-  height:26px;border-radius:7px;border:1px solid var(--line-2);background:var(--surface);
-  padding:0 24px 0 9px;font-size:11.5px;color:var(--text-2);outline:none;cursor:pointer;flex:none;
-  appearance:none;-webkit-appearance:none;
-  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%239a9aa0' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:right 8px center;background-size:11px;
-}
-select.mini:focus{border-color:var(--accent);}
-.list{overflow-y:auto;flex:1;}
-.item{
-  display:block;width:100%;text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);
-  cursor:pointer;transition:background .12s;position:relative;
-}
-.item:hover{background:var(--hover);}
-.item.on{background:var(--accent-soft);}
-.item.on::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2.5px;background:var(--accent);}
-.item-top{display:flex;align-items:baseline;gap:8px;}
-.item .name{font-weight:600;font-size:13.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.item .when{font-size:11px;color:var(--text-3);flex:none;font-variant-numeric:tabular-nums;}
-.item .tit{font-size:12.5px;font-weight:600;color:var(--text-1);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.item .loc{font-size:11.5px;color:var(--text-3);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.item-foot .who{font-size:11px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px;}
-.item .snip{
-  font-size:12px;color:var(--text-2);margin-top:5px;line-height:1.4;
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
-}
-.item-foot{display:flex;align-items:center;gap:7px;margin-top:8px;flex-wrap:wrap;}
-
-.tag{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:5px;font-size:11px;font-weight:600;white-space:nowrap;letter-spacing:0;}
-.tag.open{background:var(--open-soft);color:var(--open);}
-.tag.progress{background:var(--progress-soft);color:var(--progress);}
-.tag.resolved{background:var(--resolved-soft);color:var(--resolved);}
-
-.pri{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:550;white-space:nowrap;}
-.pri .bars{display:inline-flex;gap:2px;align-items:flex-end;}
-.pri .bars i{width:2.5px;border-radius:1px;background:currentColor;opacity:.22;}
-.pri .bars i:nth-child(1){height:5px;}
-.pri .bars i:nth-child(2){height:8px;}
-.pri .bars i:nth-child(3){height:11px;}
-.pri .bars i.f{opacity:1;}
-.pri.urgent{color:var(--alert);}
-.pri.high{color:var(--open);}
-.pri.medium{color:var(--progress);}
-.pri.low{color:var(--text-3);}
-
-.cat{font-size:11.5px;color:var(--text-3);}
-.late{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:var(--alert);
-  background:var(--alert-soft);height:20px;padding:0 7px;border-radius:5px;white-space:nowrap;}
-.late svg{width:11px;height:11px;}
-.dotnote{width:4.5px;height:4.5px;border-radius:50%;background:var(--text-3);opacity:.55;flex:none;}
-
-/* ---- pane 3: detail ---- */
-.detail{background:var(--bg);display:flex;flex-direction:column;min-width:0;}
-.detail-head{
-  padding:14px 22px;border-bottom:1px solid var(--line);flex:none;display:flex;align-items:flex-start;gap:12px;
-  background:var(--bg);
-}
-.detail-head .who{min-width:0;flex:1;}
-.detail-head h2{margin:0;font-size:19px;font-weight:600;letter-spacing:-0.025em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.detail-head .sub{font-size:12px;color:var(--text-3);margin-top:2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
-.detail-body{overflow-y:auto;flex:1;padding:18px 22px 40px;}
-.detail-body .inner{max-width:660px;}
-.detail-foot{padding:10px 22px;border-top:1px solid var(--line);flex:none;display:flex;align-items:center;gap:8px;}
-
-.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow-sm);margin-bottom:14px;overflow:hidden;}
-.panel-h{padding:10px 15px;border-bottom:1px solid var(--line);background:var(--surface-2);
-  font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-3);}
-.panel-b{padding:14px 15px;}
-
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px 16px;}
-.fld label{display:block;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);margin-bottom:4px;}
-.inp{
-  width:100%;height:32px;border-radius:8px;border:1px solid var(--line-2);background:var(--surface);
-  padding:0 10px;outline:none;font-size:13px;transition:border-color .15s,box-shadow .15s;
-}
-.inp:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
-select.inp{appearance:none;-webkit-appearance:none;cursor:pointer;padding-right:26px;
-  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%239a9aa0' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:right 9px center;background-size:11px;}
-textarea.inp{height:auto;min-height:92px;padding:9px 10px;line-height:1.55;resize:vertical;}
-
-/* click-to-edit fields */
-.ghost{
-  width:100%;border:1px solid transparent;background:transparent;border-radius:7px;
-  padding:5px 8px;margin:-5px -8px;outline:none;font-size:13.5px;
-  transition:background .12s,border-color .12s,box-shadow .12s;
-}
-.ghost:hover{background:var(--hover);}
-.ghost:focus{background:var(--surface);border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
-textarea.ghost{line-height:1.6;resize:vertical;min-height:80px;display:block;}
-.ghost::placeholder{color:var(--text-3);font-style:italic;}
-select.ghost{appearance:none;-webkit-appearance:none;cursor:pointer;padding-right:24px;
-  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%239a9aa0' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 6px center;background-size:11px;}
-select.ghost:hover{background-color:var(--hover);background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5' fill='none' stroke='%239a9aa0' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 6px center;background-size:11px;}
-input.tituloEd{font-weight:600;font-size:14px;margin-bottom:2px;}
-
-.contact{display:grid;grid-template-columns:86px 1fr;gap:9px 10px;align-items:center;}
-.contact dt{font-size:12px;color:var(--text-3);}
-.contact dd{margin:0;min-width:0;}
-.linkrow{display:flex;align-items:center;gap:8px;}
-.linkrow .go{flex:none;width:26px;height:26px;border-radius:7px;display:grid;place-items:center;color:var(--text-3);transition:background .12s,color .12s;}
-.linkrow .go:hover{background:var(--hover);color:var(--accent);}
-.linkrow .go svg{width:14px;height:14px;}
-
-.factrow{display:flex;gap:26px;flex-wrap:wrap;}
-.fact .k{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);}
-.fact .v{font-size:14px;font-weight:550;margin-top:2px;font-variant-numeric:tabular-nums;}
-.fact .v.warn{color:var(--alert);}
-
-.banner{display:flex;gap:9px;align-items:flex-start;background:var(--alert-soft);color:var(--alert);
-  border-radius:var(--r);padding:11px 13px;font-size:12.5px;margin-bottom:14px;line-height:1.45;}
-.banner svg{width:15px;height:15px;flex:none;margin-top:1px;}
-
-.note{display:flex;gap:11px;padding:11px 15px;border-bottom:1px solid var(--line);}
-.note:last-of-type{border-bottom:none;}
-.note .rail{flex:none;width:7px;display:flex;flex-direction:column;align-items:center;padding-top:5px;}
-.note .rail i{width:6px;height:6px;border-radius:50%;background:var(--line-2);flex:none;}
-.note .rail u{flex:1;width:1px;background:var(--line);text-decoration:none;margin-top:4px;}
-.note:last-of-type .rail u{display:none;}
-.note .bd{min-width:0;flex:1;}
-.note time{display:block;font-size:11px;color:var(--text-3);margin-bottom:2px;}
-.note p{margin:0;line-height:1.5;white-space:pre-wrap;font-size:13px;}
-.note-empty{padding:14px 15px;color:var(--text-3);font-size:12.5px;font-style:italic;}
-.addnote{padding:12px 15px;border-top:1px solid var(--line);background:var(--surface-2);}
-
-.blank{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-3);gap:10px;text-align:center;padding:24px;}
-.blank svg{width:38px;height:38px;opacity:.3;}
-.blank p{margin:0;font-size:13px;}
-.empty-list{padding:44px 20px;text-align:center;color:var(--text-3);font-size:12.5px;}
-
-/* ---- pane 2/3 replacement: dashboard ---- */
-.dash{display:none;flex-direction:column;background:var(--bg);min-width:0;}
-.dash-head{padding:13px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex:none;flex-wrap:wrap;background:var(--bg);}
-.dash-head h2{margin:0;font-size:19px;font-weight:600;letter-spacing:-.025em;}
-.dash-head .scope{display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
-.chip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 5px 0 10px;border-radius:12px;
-  background:var(--accent-soft);color:var(--accent);font-size:11.5px;font-weight:600;white-space:nowrap;}
-.chip button{width:17px;height:17px;border-radius:50%;display:grid;place-items:center;color:inherit;opacity:.65;}
-.chip button:hover{opacity:1;background:var(--hover);}
-.chip svg{width:9px;height:9px;}
-.dash-body{overflow-y:auto;flex:1;padding:16px 22px 40px;}
-
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:12px;margin-bottom:14px;}
-.kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow-sm);
-  padding:13px 15px;display:block;width:100%;text-align:left;cursor:default;
-  transition:border-color .15s,box-shadow .15s,transform .12s;}
-.kpi.click{cursor:pointer;}
-.kpi.click:hover{border-color:var(--line-2);box-shadow:var(--shadow-md);transform:translateY(-1px);}
-.kpi.off{opacity:.55;}
-.kpi.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),var(--shadow-sm);}
-.kpi.on.warn{border-color:var(--alert);box-shadow:0 0 0 1px var(--alert),var(--shadow-sm);}
-.kpi.on.good{border-color:var(--resolved);box-shadow:0 0 0 1px var(--resolved),var(--shadow-sm);}
-.kpi .k{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);}
-.kpi .v{font-size:28px;font-weight:600;letter-spacing:-.03em;line-height:1.2;margin-top:3px;font-variant-numeric:tabular-nums;}
-.kpi .v small{font-size:14px;font-weight:500;color:var(--text-3);letter-spacing:-.01em;margin-left:5px;}
-.kpi .s{font-size:11.5px;color:var(--text-3);margin-top:2px;}
-.kpi.warn .v{color:var(--alert);}
-.kpi.good .v{color:var(--resolved);}
-
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(288px,1fr));gap:14px;}
-.dcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow-sm);overflow:hidden;}
-.dcard.wide{grid-column:1/-1;}
-.dcard-h{padding:10px 15px;border-bottom:1px solid var(--line);background:var(--surface-2);
-  font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-3);}
-.dcard-b{padding:14px 15px;}
-
-.barlist{display:flex;flex-direction:column;gap:4px;margin:-6px -8px;}
-.barrow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;align-items:baseline;
-  width:100%;text-align:left;padding:6px 8px;border-radius:8px;cursor:pointer;
-  transition:background .12s,opacity .15s;}
-.barrow:hover{background:var(--hover);}
-.barrow.on{background:var(--accent-soft);}
-.barrow.on .bl{font-weight:650;}
-.barrow.dim{opacity:.42;}
-.barrow.dim:hover{opacity:1;}
-.barrow .bl{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.barrow .bn{font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums;white-space:nowrap;}
-.track{grid-column:1/-1;height:7px;border-radius:4px;background:var(--surface-3);overflow:hidden;display:flex;}
-.track i{height:100%;display:block;transition:width .3s ease;}
-.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:13px;font-size:11.5px;color:var(--text-2);}
-.legend span{display:inline-flex;align-items:center;gap:6px;}
-.legend em{width:8px;height:8px;border-radius:2.5px;font-style:normal;flex:none;}
-
-.donut{display:flex;align-items:center;gap:20px;flex-wrap:wrap;}
-.donut .ring{position:relative;width:120px;height:120px;flex:none;}
-.donut svg{width:120px;height:120px;display:block;}
-.donut .mid{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;}
-.donut .mid b{font-size:23px;font-weight:600;letter-spacing:-.03em;line-height:1;}
-.donut .mid span{font-size:10.5px;color:var(--text-3);margin-top:2px;}
-.donut svg .seg{cursor:pointer;transition:opacity .15s;}
-.donut svg .seg:hover{opacity:1 !important;}
-.donut .keys{display:flex;flex-direction:column;gap:2px;min-width:118px;flex:1;margin:0 -8px;max-width:calc(100% + 16px);}
-.donut .key{display:flex;align-items:center;gap:8px;font-size:12.5px;width:100%;text-align:left;min-width:0;
-  padding:5px 8px;border-radius:8px;cursor:pointer;transition:background .12s,opacity .15s;}
-.donut .key:hover{background:var(--hover);}
-.donut .key.on{background:var(--accent-soft);}
-.donut .key.on .kl{color:var(--text);font-weight:600;}
-.donut .key.dim{opacity:.42;}
-.donut .key.dim:hover{opacity:1;}
-.donut .key em{width:9px;height:9px;border-radius:3px;font-style:normal;flex:none;}
-.donut .key .kl{flex:1;min-width:0;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.donut .key .kv{font-weight:600;font-variant-numeric:tabular-nums;}
-
-.cols{display:flex;align-items:flex-end;gap:5px;height:112px;}
-.col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px;height:100%;min-width:0;}
-.col .cv{font-size:10.5px;color:var(--text-2);font-variant-numeric:tabular-nums;}
-.col .bar{width:100%;max-width:34px;border-radius:4px 4px 2px 2px;background:var(--accent);opacity:.85;min-height:3px;transition:height .35s ease;}
-.col .cl{font-size:9.5px;color:var(--text-3);white-space:nowrap;}
-.col.now .bar{opacity:1;}
-
-.attn-row{display:flex;align-items:center;gap:10px;padding:9px 15px;border-bottom:1px solid var(--line);width:100%;text-align:left;}
-.attn-row:last-child{border-bottom:none;}
-.attn-row:hover{background:var(--hover);}
-.attn-row .nm{flex:1;min-width:0;}
-.attn-row .nm b{display:block;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.attn-row .nm span{font-size:11.5px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;}
-.attn-row .d{font-size:12px;font-weight:700;color:var(--alert);flex:none;font-variant-numeric:tabular-nums;}
-.dempty{padding:24px 15px;text-align:center;color:var(--text-3);font-size:12.5px;}
-
-/* ================= modal / toast ================= */
-.scrim{position:fixed;inset:0;background:rgba(0,0,0,.3);opacity:0;pointer-events:none;transition:opacity .22s;z-index:50;backdrop-filter:blur(2px);}
-.scrim.on{opacity:1;pointer-events:auto;}
-.modal{
-  position:fixed;z-index:60;left:50%;top:50%;transform:translate(-50%,-46%) scale(.97);
-  width:540px;max-width:calc(100% - 28px);max-height:88vh;
-  background:var(--surface);border-radius:16px;box-shadow:var(--shadow-lg);
-  opacity:0;pointer-events:none;transition:opacity .18s,transform .24s cubic-bezier(.32,.72,0,1);
-  display:flex;flex-direction:column;overflow:hidden;
-}
-.modal.on{opacity:1;pointer-events:auto;transform:translate(-50%,-50%) scale(1);}
-.modal-head{padding:17px 20px 2px;}
-.modal-head h2{margin:0;font-size:16px;font-weight:600;letter-spacing:-0.02em;}
-.modal-head p{margin:3px 0 0;font-size:12px;color:var(--text-3);}
-.modal-body{padding:15px 20px 2px;overflow-y:auto;}
-.modal-body .fld{margin-bottom:13px;}
-.modal-foot{padding:13px 20px 17px;display:flex;gap:8px;justify-content:flex-end;}
-.toast{position:fixed;bottom:20px;left:50%;transform:translate(-50%,14px);background:var(--text);color:var(--bg);
-  padding:8px 15px;border-radius:9px;font-size:12.5px;font-weight:550;box-shadow:var(--shadow-lg);
-  opacity:0;pointer-events:none;transition:opacity .18s,transform .24s cubic-bezier(.32,.72,0,1);z-index:90;}
-.toast.on{opacity:1;transform:translate(-50%,0);}
-
-/* ================= responsive ================= */
-#sideBtn,#backBtn{display:none;}
-.app.on-dash{grid-template-columns:214px 1fr;}
-.app.on-dash .list-pane,.app.on-dash .detail{display:none;}
-.app.on-dash .dash{display:flex;}
-@media (max-width:1240px){
-  .app{grid-template-columns:200px minmax(0,1fr) minmax(0,1fr);}
-  .app.on-dash{grid-template-columns:200px 1fr;}
-  .brand{width:200px;}
-}
-@media (max-width:1040px){
-  .app{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
-  .app.on-dash{grid-template-columns:1fr;}
-  .side{position:fixed;left:0;top:var(--head-h);bottom:0;width:250px;z-index:55;
-    transform:translateX(-102%);transition:transform .26s cubic-bezier(.32,.72,0,1);box-shadow:var(--shadow-lg);}
-  .side.on{transform:none;}
-  #sideBtn{display:inline-flex;}
-  .brand{width:auto;}
-  .brand em{display:none;}
-}
-@media (max-width:780px){
-  .app{grid-template-columns:1fr;}
-  .detail{position:fixed;left:0;right:0;top:var(--head-h);bottom:0;z-index:52;
-    transform:translateX(102%);transition:transform .28s cubic-bezier(.32,.72,0,1);}
-  .detail.on{transform:none;}
-  #backBtn{display:inline-flex;}
-  .search{max-width:none;}
-  .detail-head,.detail-body,.detail-foot,.dash-head,.dash-body{padding-left:15px;padding-right:15px;}
-  .grid2{grid-template-columns:1fr;}
-  .kpis{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));}
-}
-@media (max-width:560px){
-  .brand h1{display:none;}
-  .hide-xs{display:none;}
+function _enAlcance(user, ticket) {
+  const a = _alcance(user);
+  return !a || String(ticket.category || '') === a;
 }
 
-/* ===== login + estado de sincronizacion (agregado para el backend) ===== */
-#gate{position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center;
-  background:var(--bg);padding:24px}
-#gate.on{display:flex}
-#gate .card{width:100%;max-width:340px;background:var(--surface);border:1px solid var(--line);
-  border-radius:var(--r);box-shadow:var(--shadow-md);padding:26px 24px}
-#gate .mark{width:38px;height:38px;border-radius:10px;background:var(--accent);
-  display:grid;place-items:center;margin-bottom:16px}
-#gate h2{font-size:17px;font-weight:650;margin:0 0 3px;color:var(--text)}
-#gate p{font-size:12.5px;color:var(--text-2);margin:0 0 20px}
-#gate label{display:block;font-size:11.5px;font-weight:600;color:var(--text-2);
-  margin:0 0 5px;text-transform:uppercase;letter-spacing:.04em}
-#gate input{width:100%;padding:9px 11px;font:inherit;font-size:14px;color:var(--text);
-  background:var(--surface-2);border:1px solid var(--line-2);border-radius:var(--r-sm);
-  margin-bottom:14px;outline:none}
-#gate input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-#gate button{width:100%;padding:10px;font:inherit;font-size:14px;font-weight:600;color:#fff;
-  background:var(--accent);border:0;border-radius:var(--r-sm);cursor:pointer}
-#gate button:disabled{opacity:.55;cursor:default}
-#gateMsg{font-size:12.5px;color:var(--alert);min-height:17px;margin:10px 0 0;text-align:center}
-#sync{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-3);
-  padding:0 4px;white-space:nowrap}
-#sync .dot{width:7px;height:7px;border-radius:50%;background:var(--resolved);flex:none}
-#sync[data-s="saving"] .dot{background:var(--progress)}
-#sync[data-s="pending"] .dot{background:var(--open)}
-#sync[data-s="off"] .dot{background:var(--alert)}
-#whoami{font-size:11.5px;color:var(--text-2);padding:0 6px;white-space:nowrap}
+// ============================================================
+// HTTP
+// ============================================================
 
-/* aviso de que otra persona esta en el mismo reclamo */
-.presence{display:flex;align-items:center;gap:8px;margin:0 0 14px;padding:9px 12px;
-  background:var(--open-soft);border:1px solid var(--open);border-radius:var(--r-sm);
-  font-size:12.5px;color:var(--text);line-height:1.45}
-.presence svg{flex:none;color:var(--open)}
-.presence b{font-weight:650}
+function doGet() {
+  return _json({ ok: true, service: 'TicketFlow API', version: '2.0' });
+}
 
-/* modal de conflicto */
-#clash{position:fixed;inset:0;z-index:210;display:none;align-items:center;justify-content:center;
-  background:rgba(0,0,0,.42);padding:24px}
-#clash.on{display:flex}
-#clash .card{width:100%;max-width:440px;background:var(--surface);border:1px solid var(--line);
-  border-radius:var(--r);box-shadow:var(--shadow-lg);padding:24px}
-#clash h3{margin:0 0 6px;font-size:16px;font-weight:650;color:var(--text)}
-#clash .lead{margin:0 0 16px;font-size:13px;color:var(--text-2);line-height:1.5}
-#clash .diff{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);
-  padding:10px 12px;margin:0 0 18px;font-size:12.5px;max-height:190px;overflow:auto}
-#clash .diff div{padding:3px 0;color:var(--text-2)}
-#clash .diff span.k{color:var(--text);font-weight:600}
-#clash .diff span.mine{color:var(--progress)}
-#clash .diff span.theirs{color:var(--open)}
-#clash .row{display:flex;gap:9px;flex-wrap:wrap}
-#clash button{flex:1;min-width:150px;padding:10px;font:inherit;font-size:13.5px;font-weight:600;
-  border-radius:var(--r-sm);cursor:pointer;border:1px solid var(--line-2);
-  background:var(--surface-2);color:var(--text)}
-#clash button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-@media(max-width:720px){#sync span.lbl,#whoami{display:none}}
-</style>
-</head>
-<body>
+function doPost(e) {
+  try {
+    const req = JSON.parse(e.postData.contents || '{}');
+    const action = String(req.action || '');
 
-<div class="topbar">
-  <button class="btn icon ghost" id="sideBtn" title="Vistas">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-  </button>
-  <div class="brand">
-    <div class="mark">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
-      </svg>
-    </div>
-    <div>
-      <h1>TicketFlow</h1>
-      <em>Gesti&oacute;n de reclamos</em>
-    </div>
-  </div>
+    if (action === 'ping')  return _json({ ok: true, ts: new Date().toISOString() });
+    if (action === 'login') return _json(apiLogin(req));
 
-  <div class="search">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-    <input type="search" id="q" placeholder="Buscar nombre, unidad, ticket, notas…">
-  </div>
+    const ses = _validarToken(req.token);
+    if (!ses.ok) return _json(ses);
+    const user = ses.user;
 
-  <div class="spacer"></div>
-
-  <div id="sync" data-s="ok" title="Estado de sincronizaci&oacute;n">
-    <span class="dot"></span><span class="lbl">Guardado</span>
-  </div>
-  <span id="whoami"></span>
-
-  <button class="btn icon" id="themeBtn" title="Claro / oscuro">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="themeIcon"></svg>
-  </button>
-  <div class="menu-wrap">
-    <button class="btn icon" id="moreBtn" title="M&aacute;s">
-      <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
-    </button>
-    <div class="menu" id="moreMenu">
-      <button data-act="csv">Exportar a planilla (CSV)</button>
-      <button data-act="backup">Guardar una copia de seguridad</button>
-      <button data-act="restore">Restaurar desde una copia…</button>
-      <hr>
-      <button data-act="logout">Cerrar sesi&oacute;n</button>
-      <hr>
-      <button data-act="reset" class="danger">Volver a los datos de ejemplo</button>
-    </div>
-  </div>
-  <button class="btn primary" id="newBtn">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-    <span class="hide-xs">Nuevo ticket</span>
-  </button>
-</div>
-
-<div class="app">
-  <nav class="side" id="side"></nav>
-
-  <section class="list-pane">
-    <div class="list-head">
-      <div style="flex:1;min-width:0">
-        <div class="t" id="listTitle">Todos los tickets</div>
-        <div class="c" id="listCount"></div>
-      </div>
-      <select class="mini" id="sortSel">
-        <option value="new">M&aacute;s nuevos primero</option>
-        <option value="old">M&aacute;s antiguos primero</option>
-        <option value="pri">Prioridad</option>
-        <option value="age">M&aacute;s tiempo abiertos</option>
-        <option value="name">Reclamante A–Z</option>
-      </select>
-    </div>
-    <div class="list" id="list"></div>
-  </section>
-
-  <section class="detail" id="detail">
-    <div id="detailInner" style="display:flex;flex-direction:column;height:100%"></div>
-  </section>
-
-  <section class="dash" id="dash">
-    <div class="dash-head">
-      <h2>Panel</h2>
-      <div class="scope" id="dashScope"></div>
-      <button class="btn" id="toList" style="margin-left:auto">
-        <span id="toListLabel">Ver estos tickets</span>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m10 6 6 6-6 6"/></svg>
-      </button>
-    </div>
-    <div class="dash-body" id="dashBody"></div>
-  </section>
-</div>
-
-<div class="scrim" id="scrim"></div>
-
-<div class="modal" id="modal" aria-hidden="true">
-  <div class="modal-head">
-    <h2>Nuevo reclamo</h2>
-    <p>Registr&aacute; el reclamo para seguirlo hasta que se resuelva.</p>
-  </div>
-  <div class="modal-body">
-    <div class="fld"><label for="nCustomer">Nombre del reclamante</label><input class="inp" id="nCustomer" placeholder="ej. María Fernández"></div>
-    <div class="grid2">
-      <div class="fld"><label for="nEmail">Email</label><input class="inp" id="nEmail" type="email" placeholder="name@email.com"></div>
-      <div class="fld"><label for="nPhone">Tel&eacute;fono</label><input class="inp" id="nPhone" placeholder="+54 11 …"></div>
-    </div>
-    <div class="grid2">
-      <div class="fld"><label for="nBuilding">Edificio</label><select class="inp" id="nBuilding"></select></div>
-      <div class="fld"><label for="nUnit">Unidad</label><input class="inp" id="nUnit" placeholder="ej. 3A" autocomplete="off"></div>
-    </div>
-    <div class="grid2">
-      <div class="fld"><label for="nCategory">Categor&iacute;a</label><select class="inp" id="nCategory"></select></div>
-      <div class="fld"><label for="nPriority">Prioridad</label><select class="inp" id="nPriority"></select></div>
-    </div>
-    <div class="grid2">
-      <div class="fld"><label for="nAssignee">A cargo de</label><input class="inp" id="nAssignee" list="assigneeList" placeholder="&iquest;Qui&eacute;n se ocupa?"><datalist id="assigneeList"></datalist></div>
-      <div class="fld"><label for="nDate">Fecha de ingreso</label><input class="inp" id="nDate" type="date"></div>
-    </div>
-    <div class="fld"><label for="nDesc">&iquest;Cu&aacute;l es el reclamo?</label><textarea class="inp" id="nDesc" placeholder="Describ&iacute; el reclamo con las palabras del reclamante…"></textarea></div>
-    <div class="fld"><label for="nTitulo">T&iacute;tulo <span style="color:var(--text-3);font-weight:400">&mdash; se arma solo, pod&eacute;s corregirlo</span></label><input class="inp" id="nTitulo" placeholder="Se completa al escribir el reclamo" autocomplete="off"></div>
-  </div>
-  <div class="modal-foot">
-    <button class="btn" id="mCancel">Cancelar</button>
-    <button class="btn primary" id="mSave">Crear ticket</button>
-  </div>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<div id="clash">
-  <div class="card">
-    <h3 id="clashTitle">Alguien m&aacute;s modific&oacute; este reclamo</h3>
-    <p class="lead" id="clashLead"></p>
-    <div class="diff" id="clashDiff"></div>
-    <div class="row">
-      <button id="clashTheirs">Quedarme con la versi&oacute;n del servidor</button>
-      <button id="clashMine" class="primary">Guardar mis cambios igual</button>
-    </div>
-  </div>
-</div>
-
-<div id="gate">
-  <div class="card">
-    <div class="mark">
-      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
-      </svg>
-    </div>
-    <h2>TicketFlow</h2>
-    <p>Estudio Giussani &middot; gesti&oacute;n de reclamos</p>
-    <label for="gEmail">Usuario</label>
-    <input type="text" id="gEmail" autocomplete="username" autocapitalize="none" spellcheck="false">
-    <label for="gPin">Contrase&ntilde;a</label>
-    <input type="password" id="gPin" autocomplete="current-password" autocapitalize="none" spellcheck="false">
-    <button id="gBtn">Ingresar</button>
-    <p id="gateMsg"></p>
-  </div>
-</div>
-<input type="file" id="fileIn" accept="application/json,.json" style="display:none">
-
-<script>
-(function(){
-"use strict";
-
-/* ================= config ================= */
-const THEME_KEY = "ticketflow.theme";
-
-/* ================= backend =================
-   Toda la persistencia pasa por aca. Reemplaza al localStorage:
-   el array `tickets` sigue siendo la copia en memoria, pero cada cambio
-   se manda al servidor ticket por ticket, no el array entero. */
-
-const API_URL   = "https://script.google.com/macros/s/AKfycbzMTW4bOLPwe51Yt6yUo4bFDkCQfZDAtkiOmtwpOyYVitVz7qJ9lr6OIJNl3kaSPlAb/exec";
-const TOKEN_KEY = "ticketflow.token";
-const USER_KEY  = "ticketflow.user";
-const QUEUE_KEY = "ticketflow.queue";
-
-let me = null;        /* usuario logueado */
-let stamp = "0";      /* sello de version del servidor */
-let syncing = false;
-let flushTimer = null;
-
-/* El Content-Type tiene que ser text/plain. Con application/json el navegador
-   dispara un preflight OPTIONS y los web apps de Apps Script no lo responden:
-   la llamada muere por CORS. redirect:"follow" tambien hace falta (Apps Script
-   contesta con un 302 a googleusercontent.com). */
-async function api(action, payload){
-  const body = Object.assign({action:action}, payload||{});
-  if(action!=="login" && action!=="ping") body.token = localStorage.getItem(TOKEN_KEY)||"";
-  let res;
-  try{
-    res = await fetch(API_URL, {
-      method:"POST", redirect:"follow",
-      headers:{"Content-Type":"text/plain;charset=utf-8"},
-      body:JSON.stringify(body)
-    });
-  }catch(e){ throw new Error("offline"); }
-  let d;
-  try{ d = await res.json(); }catch(e){ throw new Error("Respuesta inválida del servidor"); }
-  if(!d.ok && (d.error==="NO_AUTH" || d.error==="SESION_EXPIRADA")){
-    localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY);
-    showGate("Tu sesión venció. Ingresá de nuevo.");
-    throw new Error("sesion");
+    switch (action) {
+      case 'me':        return _json({ ok: true, user: _pub(user) });
+      case 'logout':    return _json(apiLogout(user));
+      case 'version':   return _json({ ok: true, stamp: _stamp() });
+      case 'latido':    return _json(apiLatido(req, user));
+      case 'soltar':    return _json(apiSoltar(req, user));
+      case 'listar':    return _json(apiListar(user));
+      case 'edificios': return _json({ ok: true, edificios: _edificios() });
+      case 'guardar':   return _json(apiGuardar(req, user));
+      case 'eliminar':  return _json(apiEliminar(req, user));
+      case 'importar':  return _json(apiImportar(req, user));
+      case 'historial': return _json(apiHistorial(req, user));
+      default:
+        return _json({ ok: false, error: 'Acción desconocida: ' + action });
+    }
+  } catch (err) {
+    return _json({ ok: false, error: String((err && err.message) || err) });
   }
-  if(!d.ok){
-    const err = new Error(d.error||"Error del servidor");
-    err.detalle = d;                 /* CONFLICTO viaja con `por` y `servidor` */
-    throw err;
+}
+
+// ============================================================
+// SESIÓN
+// ============================================================
+
+function apiLogin(req) {
+  // El usuario puede ser un mail o un nombre suelto ('diego'): es solo texto.
+  const usuario = String(req.usuario || req.email || '').trim().toLowerCase();
+  const clave   = String(req.password || req.pin || '');
+  if (!usuario || !clave) return { ok: false, error: 'Faltan datos' };
+
+  // Freno a la fuerza bruta. Sin esto, un usuario corto + PIN de 4 digitos son
+  // 10.000 combinaciones que un script prueba en minutos.
+  const cache = CacheService.getScriptCache();
+  const claveCache = 'fail_' + usuario;
+  const fallos = Number(cache.get(claveCache) || 0);
+  if (fallos >= MAX_INTENTOS) {
+    return { ok: false, error: 'Demasiados intentos fallidos. Esperá ' +
+      Math.ceil(BLOQUEO_SEG / 60) + ' minutos.' };
   }
-  return d;
+
+  const u = _usuarios().find(x => String(x.usuario).trim().toLowerCase() === usuario);
+  // Mismo mensaje en todos los casos: no revelamos qué usuarios existen.
+  if (!u || !_activo(u) || !_verificar(clave, u.pass_hash)) {
+    cache.put(claveCache, String(fallos + 1), BLOQUEO_SEG);
+    return { ok: false, error: 'Usuario o contraseña incorrecta' };
+  }
+  cache.remove(claveCache);
+
+  // Migracion silenciosa del formato viejo al nuevo, al primer login correcto.
+  if (String(u.pass_hash).indexOf('v2$') !== 0) {
+    _setUsuario(u._row, { pass_hash: _hash(clave) });
+  }
+
+  const token = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+  const exp = new Date(Date.now() + CONFIG.TOKEN_HORAS * 3600e3);
+  _setUsuario(u._row, { token: token, token_exp: exp.toISOString() });
+
+  return { ok: true, token: token, expira: exp.toISOString(), user: _pub(u) };
 }
 
-/* ---- cola de escritura (sobrevive a un cierre de pestana) ---- */
-function qGet(){ try{ return JSON.parse(localStorage.getItem(QUEUE_KEY)||"{}"); }catch(e){ return {}; } }
-function qSet(q){ try{ localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); }catch(e){} }
-function qSize(){ return Object.keys(qGet()).length; }
-
-function setSync(estado){
-  const el = $("#sync"); if(!el) return;
-  const p = qSize();
-  const txt = {ok:"Guardado", saving:"Guardando…", pending:"Pendiente ("+p+")", off:"Sin conexión ("+p+")"};
-  el.dataset.s = estado;
-  el.querySelector(".lbl").textContent = txt[estado]||"";
+function apiLogout(user) {
+  _setUsuario(user._row, { token: '', token_exp: '' });
+  return { ok: true };
 }
 
-/* Encola un ticket completo. Reemplaza al save() global. */
-function pushTicket(t){
-  const q = qGet();
-  /* `base` = el updated_at que tenia el ticket cuando lo cargamos. El servidor lo
-     compara contra el suyo: si difiere, alguien guardo en el medio. Si ya habia un
-     envio en cola para este ticket, conservamos la base original. */
-  const previo = q[t.id];
-  q[t.id] = {t:t, base:(previo && previo.base !== undefined) ? previo.base : (t.updated_at||"")};
-  qSet(q);
-  setSync("saving");
-  clearTimeout(flushTimer);
-  flushTimer = setTimeout(flush, 500);   /* junta tecleo rapido en un solo envio */
-}
-function pushDelete(id){
-  const q = qGet(); q[id] = {del:true}; qSet(q);
-  setSync("saving");
-  clearTimeout(flushTimer);
-  flushTimer = setTimeout(flush, 100);
+function _validarToken(token) {
+  if (!token) return { ok: false, error: 'NO_AUTH' };
+  const u = _usuarios().find(x => x.token && String(x.token) === String(token));
+  if (!u) return { ok: false, error: 'NO_AUTH' };
+  if (new Date(u.token_exp) < new Date()) return { ok: false, error: 'SESION_EXPIRADA' };
+  return { ok: true, user: u };
 }
 
-async function flush(){
-  if(syncing) return;
-  syncing = true;
-  try{
-    const ids = Object.keys(qGet());
-    for(let i=0;i<ids.length;i++){
-      const id = ids[i];
-      const item = qGet()[id];
-      if(!item) continue;
-      try{
-        if(item.del){
-          await api("eliminar", {id:id});
-        }else{
-          let d;
-          try{
-            d = await api("guardar", {ticket:item.t, base:item.base||""});
-          }catch(err){
-            if(err.message !== "CONFLICTO") throw err;
-            /* otro usuario guardo primero: le preguntamos al de aca */
-            const info = err.detalle || {};
-            const eleccion = await mostrarConflicto(item.t, info.servidor||{}, info.por||"Otro usuario");
-            if(eleccion === "theirs"){
-              const q0 = qGet(); delete q0[id]; qSet(q0);
-              await pull(); refresh(); renderPresencia();
-              toast("Se aplicó la versión del servidor");
-              continue;
-            }
-            d = await api("guardar", {ticket:item.t, forzar:true});
-            toast("Se guardaron tus cambios, encima de los de "+(info.por||"el otro usuario"));
-          }
-          stamp = d.stamp || stamp;
-          /* si se creo offline con id provisional, el servidor asigna el definitivo */
-          if(d.id && d.id !== id){
-            const local = tickets.find(x=>x.id===id);
-            if(local) local.id = d.id;
-            if(ui.selected === id) ui.selected = d.id;
-          }
-          /* la base para el proximo guardado es lo que acaba de quedar */
-          const local = tickets.find(x=>x.id===(d.id||id));
-          if(local && d.updated_at) local.updated_at = d.updated_at;
+function _puede(user, p) {
+  return (PERMISOS[String(user.rol || 'lectura').toLowerCase()] || []).indexOf(p) !== -1;
+}
+
+function _pub(u) {
+  return { id: u.id, usuario: u.usuario, nombre: u.nombre, rol: u.rol };
+}
+
+function _sha256(txt) {
+  return Utilities
+    .computeDigest(Utilities.DigestAlgorithm.SHA_256, txt, Utilities.Charset.UTF_8)
+    .map(b => ((b < 0 ? b + 256 : b).toString(16)).padStart(2, '0'))
+    .join('');
+}
+
+/** Formato viejo: una pasada de SHA-256 con una sal compartida por todos. */
+function _hashLegacy(txt) {
+  const salt = PropertiesService.getScriptProperties().getProperty('SALT') || 'tf-salt';
+  return _sha256(txt + '::' + salt);
+}
+
+/**
+ * Formato actual: "v2$<sal>$<hash>".
+ * Sal por usuario (dos personas con la misma contrasena guardan hashes distintos,
+ * y no sirve una tabla precomputada) + iteraciones (cada intento cuesta caro).
+ */
+function _hash(txt, salt) {
+  const s = salt || Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+  let acc = s + '::' + txt;
+  for (let i = 0; i < ITERACIONES; i++) acc = _sha256(acc);
+  return 'v2$' + s + '$' + acc;
+}
+
+/** Acepta los dos formatos, para no dejar afuera a usuarios ya creados. */
+function _verificar(txt, guardado) {
+  const g = String(guardado || '');
+  if (g.indexOf('v2$') === 0) {
+    const p = g.split('$');
+    return p.length === 3 && _hash(txt, p[1]) === g;
+  }
+  return g !== '' && _hashLegacy(txt) === g;
+}
+
+// ============================================================
+// TICKETS
+// ============================================================
+
+function apiListar(user) {
+  if (!_puede(user, 'read')) return { ok: false, error: 'Sin permiso' };
+  const a = _alcance(user);
+  let filas = _tickets().filter(_activo);
+  if (a) filas = filas.filter(r => String(r.category || '') === a);
+  // `alcance` le sirve al cliente para saber que esta viendo un recorte.
+  // Los edificios viajan con el listado para que el cliente no tenga que hacer
+  // una segunda llamada solo para llenar el desplegable.
+  return {
+    ok: true, stamp: _stamp(), alcance: a,
+    edificios: _edificios(),
+    tickets: filas.map(_aObjeto)
+  };
+}
+
+/**
+ * Upsert de UN ticket. Reemplaza el save() global del cliente:
+ * cada usuario escribe solo la fila que tocó, así dos personas trabajando
+ * sobre tickets distintos no se pisan.
+ */
+function apiGuardar(req, user) {
+  if (!_puede(user, 'write')) return { ok: false, error: 'Sin permiso' };
+  const t = req.ticket || {};
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const hoja = _asegurarAncho(_hoja('Tickets'), COLS.length);
+    const filas = _tickets();
+
+    // Un id TMP- viene de un alta hecha sin conexión: el definitivo lo pone el servidor.
+    const provisional = /^TMP-/.test(String(t.id || ''));
+
+    // El TMP- es ademas la llave de idempotencia. Si el pedido llego y se escribio
+    // la fila, pero la respuesta no volvio al celular (red movil, pestana dormida),
+    // el cliente reintenta el MISMO alta. Sin esto, cada reintento agregaba una
+    // fila nueva: un reclamo cargado una vez terminaba cuatro veces en la planilla.
+    if (provisional) {
+      const yaCreado = _altaPrevia(t.id);
+      if (yaCreado) {
+        const f = filas.find(r => String(r.id) === String(yaCreado));
+        if (f) {
+          return {
+            ok: true, id: yaCreado, idEnviado: t.id,
+            updated_at: String(f.updated_at || ''), stamp: _stamp(), repetido: true
+          };
         }
-        const q = qGet(); delete q[id]; qSet(q);
-      }catch(e){
-        if(e.message === "sesion") return;
-        setSync(e.message==="offline" ? "off" : "pending");
-        setTimeout(flush, 10000);        /* reintento */
-        return;
+        // La marca apunta a una fila que ya no existe en la planilla (la borraron
+        // a mano). Se limpia y se crea de nuevo. Ojo: una baja logica (activo =
+        // FALSE) NO entra por aca a proposito — si la oficina elimino el reclamo
+        // desde la app, un reintento tardio no tiene que resucitarlo.
+        _olvidarAlta(t.id);
       }
     }
-    setSync("ok");
-    if(typeof renderList === "function") renderList();
-  } finally { syncing = false; }
-}
 
-/* ================= presencia y conflictos =================
-   El latido hace tres cosas en un solo request: avisa donde estoy parado,
-   trae el sello de version y trae quien mas esta en el mismo ticket. */
+    const existente = (t.id && !provisional)
+      ? filas.find(r => String(r.id) === String(t.id))
+      : null;
 
-let otros = [];            /* quienes mas estan en el ticket abierto */
-let avisado = null;        /* id del ticket sobre el que ya mostre el aviso */
-let latidoTimer = null;
-
-const LATIDO_ABIERTO = 20000;   /* con un ticket abierto */
-const LATIDO_OCIOSO  = 60000;   /* en el dashboard o la lista */
-
-function fmtDesde(iso){
-  const m = Math.floor((Date.now() - new Date(iso)) / 60000);
-  if(isNaN(m)) return "";
-  if(m < 1)  return "hace menos de un minuto";
-  if(m === 1) return "hace un minuto";
-  if(m < 60) return "hace " + m + " minutos";
-  const hs = Math.floor(m/60);
-  return "hace " + hs + (hs===1 ? " hora" : " horas");
-}
-
-function renderPresencia(){
-  const box = $("#detailInner");
-  if(!box) return;
-  const vieja = box.querySelector(".presence");
-  if(vieja) vieja.remove();
-  if(!otros.length || !ui.selected) return;
-
-  const quienes = otros.map(o => "<b>"+esc(o.usuario)+"</b>").join(" y ");
-  const desde   = otros.length === 1 ? " (" + fmtDesde(otros[0].desde) + ")" : "";
-  const verbo   = otros.length === 1 ? "está" : "están";
-
-  const div = document.createElement("div");
-  div.className = "presence";
-  div.innerHTML = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">'
-    + '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>'
-    + '<path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>'
-    + '<span>' + quienes + ' ' + verbo + ' en este reclamo' + desde
-    + '. Si los dos editan, gana el último que guarde.</span>';
-  box.insertBefore(div, box.firstChild);
-}
-
-async function latido(){
-  if(document.hidden) return;
-  try{
-    const d = await api("latido", {ticket_id: ui.selected || ""});
-    const antes = otros.map(o=>o.usuario).sort().join("|");
-    otros = d.otros || [];
-    const ahora = otros.map(o=>o.usuario).sort().join("|");
-
-    if(antes !== ahora) renderPresencia();
-
-    /* aviso una sola vez por ticket, no en cada latido */
-    if(otros.length && avisado !== ui.selected){
-      avisado = ui.selected;
-      toast(otros.map(o=>o.usuario).join(" y ") + " también está en este reclamo");
+    // Deteccion de conflicto: el cliente manda el updated_at que tenia cuando
+    // cargo el ticket. Si en la planilla hay otro, alguien guardo en el medio.
+    if (existente && req.base && !req.forzar) {
+      const actual = String(existente.updated_at || '');
+      if (actual && String(req.base) !== actual) {
+        return {
+          ok: false,
+          error: 'CONFLICTO',
+          por: existente.updated_by || 'otro usuario',
+          cuando: actual,
+          servidor: _aObjeto(existente)
+        };
+      }
     }
-    if(!otros.length && avisado === ui.selected) avisado = null;
 
-    if(d.stamp !== stamp && !qSize() && !editando() && !syncing){
-      const sel = ui.selected;
-      await pull();
-      ui.selected = tickets.some(t=>t.id===sel) ? sel : null;
-      refresh(); refreshAssigneeList(); renderPresencia();
-      toast("Actualizado con los cambios del equipo");
+    // Un usuario acotado no puede tocar nada fuera de su categoria, ni sacar un
+    // ticket de ella. Se valida aca, en el servidor: el filtro del cliente es
+    // comodidad, no seguridad.
+    const alc = _alcance(user);
+    if (alc) {
+      if (existente && String(existente.category || '') !== alc) {
+        return { ok: false, error: 'Ese reclamo no es de tu area' };
+      }
+      t.category = alc;
     }
-    setSync(qSize() ? "pending" : "ok");
-  }catch(e){
-    if(e.message === "offline") setSync("off");
+
+    const fila = _aFila(t, user, existente);
+
+    if (existente) {
+      hoja.getRange(existente._row, 1, 1, COLS.length).setValues([fila]);
+      _logCambios(existente, t, user);
+    } else {
+      fila[0] = (t.id && !provisional) ? t.id : _nuevoId(filas);
+      hoja.appendRow(fila);
+      // La marca se deja DESPUES de escribir la fila: si la escritura falla, no
+      // queda una llave que haga creer que el alta ya se hizo.
+      if (provisional) _marcarAlta(t.id, fila[0]);
+      _log(fila[0], user, 'creo', '', '', t.customer || '');
+    }
+
+    _tocar();
+    return {
+      ok: true,
+      id: fila[0],
+      idEnviado: t.id || '',
+      updated_at: fila[COLS.indexOf('updated_at')],
+      stamp: _stamp()
+    };
+  } finally {
+    lock.releaseLock();
   }
 }
 
-function programarLatido(){
-  clearTimeout(latidoTimer);
-  latidoTimer = setTimeout(async function(){
-    await latido();
-    programarLatido();
-  }, ui.selected ? LATIDO_ABIERTO : LATIDO_OCIOSO);
-}
+/**
+ * Un solo request hace tres cosas, para no multiplicar llamadas:
+ *   1. deja constancia de que este usuario esta parado en `ticket_id`
+ *   2. devuelve el sello de version (para saber si hay que recargar)
+ *   3. devuelve quien mas esta parado en ese mismo ticket
+ */
+function apiLatido(req, user) {
+  if (!_puede(user, 'read')) return { ok: false, error: 'Sin permiso' };
+  const ticketId = String(req.ticket_id || '');
+  const quien = user.nombre || user.usuario;
+  const ahora = new Date();
 
-/* Al cerrar la pestana libero el lugar. Si no llega, el TTL de 75 s lo limpia igual. */
-window.addEventListener("pagehide", function(){
-  const tk = localStorage.getItem(TOKEN_KEY);
-  if(!tk) return;
-  try{
-    fetch(API_URL, {method:"POST", keepalive:true, redirect:"follow",
-      headers:{"Content-Type":"text/plain;charset=utf-8"},
-      body:JSON.stringify({action:"soltar", token:tk})});
-  }catch(e){}
-});
+  const hoja = _hoja('Presencia');
+  const filas = _leer('Presencia', COLS_PRESENCIA);
+  const mia = filas.find(f => String(f.usuario) === quien);
 
-/* ---- modal de conflicto ---- */
-const CAMPOS = {status:"Estado", priority:"Prioridad", assignee:"A cargo de",
-  category:"Categoría", customer:"Reclamante", location:"Unidad", description:"Descripción",
-  email:"Email", phone:"Teléfono"};
+  if (mia) {
+    // Si cambio de ticket, reinicia el "desde"; si sigue en el mismo, lo conserva.
+    const mismo = String(mia.ticket_id) === ticketId;
+    hoja.getRange(mia._row, 2).setValue(ticketId);
+    if (!mismo) hoja.getRange(mia._row, 3).setValue(ahora.toISOString());
+    hoja.getRange(mia._row, 4).setValue(ahora.toISOString());
+  } else {
+    hoja.appendRow([quien, ticketId, ahora.toISOString(), ahora.toISOString()]);
+  }
 
-function mostrarConflicto(mio, servidor, por){
-  return new Promise(function(resolve){
-    $("#clashLead").innerHTML = "<b>" + esc(por) + "</b> guardó cambios en "
-      + esc(mio.id) + " mientras lo editabas. Elegí con cuál te quedás.";
-
-    let filas = "";
-    Object.keys(CAMPOS).forEach(function(k){
-      const a = String(mio[k]==null?"":mio[k]);
-      const b = String(servidor[k]==null?"":servidor[k]);
-      if(a === b) return;
-      filas += '<div><span class="k">'+CAMPOS[k]+'</span>: '
-        + '<span class="mine">'+esc(a||"(vacío)")+'</span> &nbsp;vs&nbsp; '
-        + '<span class="theirs">'+esc(b||"(vacío)")+'</span></div>';
+  const otros = [];
+  if (ticketId) {
+    filas.forEach(f => {
+      if (String(f.usuario) === quien) return;
+      if (String(f.ticket_id) !== ticketId) return;
+      const edad = (ahora - new Date(f.latido)) / 1000;
+      if (edad > PRESENCIA_TTL_SEG) return;   // pestana cerrada o sin red
+      otros.push({ usuario: f.usuario, desde: f.desde });
     });
-    const nMio = (mio.notes||[]).length, nSrv = (servidor.notes||[]).length;
-    if(nMio !== nSrv){
-      filas += '<div><span class="k">Notas</span>: '
-        + '<span class="mine">'+nMio+'</span> &nbsp;vs&nbsp; <span class="theirs">'+nSrv+'</span></div>';
-    }
-    $("#clashDiff").innerHTML = filas
-      ? '<div style="margin-bottom:6px;color:var(--text-3)">tu versión &nbsp;vs&nbsp; la del servidor</div>' + filas
-      : '<div>No hay diferencias visibles en los campos principales.</div>';
+  }
 
-    $("#clash").classList.add("on");
-    function cerrar(r){
-      $("#clash").classList.remove("on");
-      $("#clashMine").onclick = null;
-      $("#clashTheirs").onclick = null;
-      resolve(r);
+  return { ok: true, stamp: _stamp(), otros: otros };
+}
+
+/** El usuario cerro el ticket o la app: libera la presencia. */
+function apiSoltar(req, user) {
+  const quien = user.nombre || user.usuario;
+  const filas = _leer('Presencia', COLS_PRESENCIA);
+  const mia = filas.find(f => String(f.usuario) === quien);
+  if (mia) _hoja('Presencia').getRange(mia._row, 2).setValue('');
+  return { ok: true };
+}
+
+function apiEliminar(req, user) {
+  if (!_puede(user, 'delete')) return { ok: false, error: 'Sin permiso' };
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const fila = _tickets().find(r => String(r.id) === String(req.id));
+    if (!fila) return { ok: false, error: 'No encontrado' };
+    // Baja lógica: la fila queda en la planilla con activo = FALSE.
+    const hoja = _hoja('Tickets');
+    hoja.getRange(fila._row, COLS.indexOf('activo') + 1).setValue(false);
+    hoja.getRange(fila._row, COLS.indexOf('updated_at') + 1).setValue(new Date().toISOString());
+    hoja.getRange(fila._row, COLS.indexOf('updated_by') + 1).setValue(user.nombre || user.usuario);
+    _log(req.id, user, 'elimino', '', fila.customer, '');
+    _tocar();
+    return { ok: true, stamp: _stamp() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Reemplazo masivo: lo usan "Restore backup" y "Reset sample data". */
+function apiImportar(req, user) {
+  if (!_puede(user, 'admin')) {
+    return { ok: false, error: 'Solo un admin puede reemplazar todos los tickets' };
+  }
+  const lista = req.tickets || [];
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(60000);
+  try {
+    const hoja = _asegurarAncho(_hoja('Tickets'), COLS.length);
+    if (hoja.getLastRow() > 1) {
+      hoja.getRange(2, 1, hoja.getLastRow() - 1, COLS.length).clearContent();
     }
-    $("#clashMine").onclick   = function(){ cerrar("mine"); };
-    $("#clashTheirs").onclick = function(){ cerrar("theirs"); };
+    if (lista.length) {
+      const filas = lista.map((t, i) => {
+        const f = _aFila(t, user, null);
+        if (!f[0]) f[0] = 'TF-' + (1001 + i);
+        return f;
+      });
+      hoja.getRange(2, 1, filas.length, COLS.length).setValues(filas);
+    }
+    _log('*', user, 'reemplazo todos los tickets', '', '', String(lista.length));
+    _tocar();
+    return { ok: true, cantidad: lista.length, stamp: _stamp() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function apiHistorial(req, user) {
+  if (!_puede(user, 'read')) return { ok: false, error: 'Sin permiso' };
+  if (_alcance(user) && req.ticket_id) {
+    const t = _tickets().find(r => String(r.id) === String(req.ticket_id));
+    if (t && !_enAlcance(user, t)) return { ok: false, error: 'Ese reclamo no es de tu area' };
+  }
+  const hoja = _hoja('Historial');
+  if (hoja.getLastRow() < 2) return { ok: true, datos: [] };
+  const vals = hoja.getRange(2, 1, hoja.getLastRow() - 1, COLS_HISTORIAL.length).getValues();
+  const out = [];
+  vals.forEach(v => {
+    if (req.ticket_id && String(v[1]) !== String(req.ticket_id)) return;
+    const o = {};
+    COLS_HISTORIAL.forEach((c, i) => { o[c] = v[i] instanceof Date ? v[i].toISOString() : v[i]; });
+    out.push(o);
   });
+  return { ok: true, datos: out.reverse().slice(0, Number(req.limit || 200)) };
 }
 
-/* ---- lectura ---- */
-async function pull(){
-  const d = await api("listar");
-  stamp = d.stamp;
-  if(d.edificios && d.edificios.length) edificiosSrv = d.edificios;
-  tickets = (d.tickets||[]).map(migrate);
-}
+// ============================================================
+// MAPEO FILA <-> OBJETO
+// ============================================================
 
-function editando(){
-  const a = document.activeElement;
-  return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest("#detailInner, #modal"));
-}
-
-
-window.addEventListener("online",  function(){ setSync("saving"); flush(); });
-document.addEventListener("visibilitychange", function(){
-  if(!document.hidden && localStorage.getItem(TOKEN_KEY)){ latido(); programarLatido(); }
-});
-window.addEventListener("offline", function(){ setSync("off"); });
-
-/* ---- login ---- */
-function showGate(msg){
-  clearTimeout(latidoTimer);
-  otros = []; avisado = null;
-  $("#gate").classList.add("on");
-  $("#gateMsg").textContent = msg||"";
-  $("#gPin").value = "";
-  setTimeout(function(){ ($("#gEmail").value ? $("#gPin") : $("#gEmail")).focus(); }, 80);
-}
-function hideGate(){ $("#gate").classList.remove("on"); }
-
-async function doLogin(){
-  const btn = $("#gBtn");
-  const usuario = $("#gEmail").value.trim();
-  const clave   = $("#gPin").value;          /* sin trim: un espacio puede ser parte de la clave */
-  if(!usuario || !clave){ $("#gateMsg").textContent = "Completá usuario y contraseña."; return; }
-  btn.disabled = true; btn.textContent = "Ingresando…"; $("#gateMsg").textContent = "";
-  try{
-    const d = await api("login", {usuario:usuario, password:clave});
-    localStorage.setItem(TOKEN_KEY, d.token);
-    localStorage.setItem(USER_KEY, JSON.stringify(d.user));
-    me = d.user;
-    hideGate();
-    await arrancarApp();
-  }catch(e){
-    $("#gateMsg").textContent = e.message==="offline"
-      ? "Sin conexión con el servidor." : e.message;
-  }finally{
-    btn.disabled = false; btn.textContent = "Ingresar";
+function _aObjeto(r) {
+  const t = {
+    id: r.id, customer: r.customer, email: r.email, phone: r.phone,
+    location: r.location, category: r.category,
+    submitted: String(r.submitted || '').slice(0, 10),
+    status: r.status, priority: r.priority, assignee: r.assignee,
+    description: r.description, titulo: String(r.titulo || ''), notes: []
+  };
+  if (r.notes) {
+    try { t.notes = JSON.parse(r.notes) || []; } catch (e) { t.notes = []; }
   }
-}
-
-async function doLogout(){
-  try{ await api("logout"); }catch(e){}
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(USER_KEY);
-  me = null; tickets = []; ui.selected = null;
-  showGate("");
-}
-
-
-/* Los valores de CATEGORIES son los que viajan al servidor y quedan escritos en
-   la planilla. NO se traducen: cambiarlos obligaria a migrar todas las filas ya
-   cargadas y a tocar la constante del backend. Lo que se traduce es la etiqueta
-   que ve el usuario, via CAT_LABEL / catLabel(). */
-const CATEGORIES = [
-  "Maintenance & Repairs","Noise & Neighbors","Fees & Payments",
-  "Cleaning","Security","Common Areas","Other"
-];
-const CAT_LABEL = {
-  "Maintenance & Repairs":"Mantenimiento y reparaciones",
-  "Noise & Neighbors":"Ruidos y convivencia",
-  "Fees & Payments":"Expensas y pagos",
-  "Cleaning":"Limpieza",
-  "Security":"Seguridad",
-  "Common Areas":"Espacios comunes",
-  "Other":"Otros"
-};
-const catLabel = c => CAT_LABEL[c] || c;
-/* days = cuantos dias puede quedar un reclamo de esta prioridad antes de marcarse */
-const PRIORITIES = [
-  {id:"urgent", label:"Urgente", bars:3, days:2},
-  {id:"high",   label:"Alta",    bars:3, days:5},
-  {id:"medium", label:"Media",   bars:2, days:10},
-  {id:"low",    label:"Baja",    bars:1, days:21}
-];
-const STATUSES = [
-  {id:"open", label:"Abierto"},
-  {id:"progress", label:"En curso"},
-  {id:"resolved", label:"Resuelto"}
-];
-const pri = id => PRIORITIES.find(p=>p.id===id) || PRIORITIES[2];
-const sta = id => STATUSES.find(s=>s.id===id) || STATUSES[0];
-
-const ICONS = {
-  all:'<path d="M4 6h16M4 12h16M4 18h16"/>',
-  open:'<circle cx="12" cy="12" r="8.5"/>',
-  progress:'<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
-  resolved:'<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.2 2.4 2.4 4.6-4.9"/>',
-  highpri:'<path d="M5 21V4.5M5 5.2h10.5l-1.6 3.4 1.6 3.4H5"/>',
-  attn:'<path d="M10.3 4.3 2.6 17.4A1.6 1.6 0 0 0 4 19.8h16a1.6 1.6 0 0 0 1.4-2.4L13.7 4.3a1.6 1.6 0 0 0-2.8 0z"/><path d="M12 9.5v4M12 16.6v.2"/>'
-};
-
-/* ================= sample data ================= */
-const SAMPLE = [
- {customer:"María Fernández", email:"m.fernandez@correo.com", phone:"+54 11 4782-3391", location:"JARAMILLO 1838 — 3A", category:"Maintenance & Repairs", ago:14, status:"progress", priority:"urgent", assignee:"Lucía Romero",
-  description:"Pérdida de agua en el techo del baño, viene de la unidad de arriba. La pintura de la pared ya está ampollada y le preocupa el tablero eléctrico que está al lado.",
-  notes:[{ago:13,text:"Llamé al plomero, visita el jueves a la mañana."},{ago:9,text:"El plomero confirmó una junta rota en el 4A. Falta que el propietario del 4A autorice el arreglo."}]},
-
- {customer:"Jorge Molina", email:"jorgemolina@correo.com", phone:"+54 11 5563-1120", location:"JARAMILLO 1838 — 2C", category:"Noise & Neighbors", ago:9, status:"open", priority:"medium", assignee:"Pablo Sosa",
-  description:"Música fuerte en la unidad de al lado después de medianoche, tres noches esta semana. Pide que se vuelva a circular el reglamento interno.",
-  notes:[]},
-
- {customer:"Silvia Grandi", email:"s.grandi@correo.com", phone:"+54 11 4311-8845", location:"ALEM 135 — PB", category:"Cleaning", ago:3, status:"open", priority:"low", assignee:"Pablo Sosa",
-  description:"El piso del hall de entrada no se baldea desde el viernes pasado. En la zona de la puerta de servicio también quedan bolsas fuera de los contenedores.",
-  notes:[{ago:2,text:"Se lo mencioné por teléfono a la empresa de limpieza."}]},
-
- {customer:"Héctor Baldi", email:"hbaldi@correo.com", phone:"+54 11 4902-7734", location:"ALEM 135 — 5B", category:"Fees & Payments", ago:21, status:"progress", priority:"high", assignee:"Lucía Romero",
-  description:"Cuestiona la expensa extraordinaria por el arreglo del ascensor en la liquidación del mes pasado. Pide la factura y el acta de asamblea que lo aprobó.",
-  notes:[{ago:20,text:"Le mandé por mail la factura del proveedor."},{ago:16,text:"Respondió pidiendo también el acta — todavía estoy buscando la copia firmada."}]},
-
- {customer:"Ana Lucchetti", email:"ana.lucchetti@correo.com", phone:"+54 11 6120-4478", location:"URQUIZA 1661 — 7D", category:"Security", ago:2, status:"open", priority:"urgent", assignee:"Diego Giussani",
-  description:"La cerradura de la puerta de entrada no traba bien; desde la vereda se puede empujar y abrir. Avisó hoy a las 8 de la mañana.",
-  notes:[{ago:2,text:"Llamé al cerrajero, pedí visita de urgencia para el mismo día."}]},
-
- {customer:"Roberto Paz", email:"rpaz@correo.com", phone:"+54 11 4455-2093", location:"URQUIZA 1661 — 1A", category:"Common Areas", ago:31, status:"resolved", priority:"medium", assignee:"Pablo Sosa",
-  description:"Banco roto y dos baldosas flojas en el patio interno, riesgo de tropiezo para los vecinos mayores.",
-  notes:[{ago:28,text:"Llegó el presupuesto de la empresa de mantenimiento."},{ago:19,text:"Trabajo terminado y revisado. El vecino confirmó que quedó conforme."}]},
-
- {customer:"Claudia Ferreyra", email:"c.ferreyra@correo.com", phone:"+54 11 5811-6602", location:"JARAMILLO 1838 — 6B", category:"Maintenance & Repairs", ago:6, status:"progress", priority:"high", assignee:"Lucía Romero",
-  description:"El ascensor se para entre el 5.º y el 6.º piso de manera intermitente. Ya quedó encerrada una vez, unos diez minutos.",
-  notes:[{ago:6,text:"Avisé a la empresa de ascensores esa misma mañana — quedó como llamado prioritario."},{ago:4,text:"El técnico cambió un sensor de puerta; seguimos una semana antes de cerrar."}]},
-
- {customer:"Fernando Ríos", email:"f.rios@correo.com", phone:"+54 11 4677-9018", location:"ALEM 135 — 3C", category:"Fees & Payments", ago:5, status:"open", priority:"medium", assignee:"Diego Giussani",
-  description:"Pregunta por qué el consumo de agua subió 18% respecto de la liquidación anterior. Quiere el detalle explicado por escrito.",
-  notes:[]},
-
- {customer:"Marta Insaurralde", email:"marta.i@correo.com", phone:"+54 11 4128-5567", location:"URQUIZA 1661 — 4C", category:"Noise & Neighbors", ago:17, status:"resolved", priority:"low", assignee:"Pablo Sosa",
-  description:"Obra en una unidad vecina que arranca antes del horario permitido.",
-  notes:[{ago:15,text:"Hablé con el propietario y con el contratista; horario acordado por escrito."},{ago:11,text:"El vecino confirma que ahora empiezan a las 9. Cierro el reclamo."}]},
-
- {customer:"Nicolás Vera", email:"nvera@correo.com", phone:"+54 11 5390-2214", location:"JARAMILLO 1838 — 1B", category:"Cleaning", ago:11, status:"open", priority:"medium", assignee:"Pablo Sosa",
-  description:"Olor persistente en el cuarto de residuos, sobre todo los fines de semana. Sospecha que no se lavan los contenedores.",
-  notes:[{ago:10,text:"Le pedí al encargado que lave los contenedores una vez por semana y avise."}]},
-
- {customer:"Gabriela Ponce", email:"g.ponce@correo.com", phone:"+54 11 4744-3380", location:"ALEM 135 — 2A", category:"Security", ago:8, status:"progress", priority:"high", assignee:"Diego Giussani",
-  description:"La cámara de la cochera está fuera de servicio hace dos semanas. Rayaron el auto de un vecino y no hay grabación.",
-  notes:[{ago:7,text:"La empresa de seguridad dice que falló el disco del grabador. Pedí presupuesto."}]},
-
- {customer:"Esteban Duarte", email:"e.duarte@correo.com", phone:"+54 11 6033-7712", location:"URQUIZA 1661 — 6A", category:"Common Areas", ago:4, status:"open", priority:"low", assignee:"Lucía Romero",
-  description:"Pide que la planilla de reservas de la terraza pase a ser digital, la de papel de la cartelera se pierde todo el tiempo.",
-  notes:[]},
-
- {customer:"Patricia Sánchez", email:"p.sanchez@correo.com", phone:"+54 11 4288-1145", location:"JARAMILLO 1838 — 5C", category:"Maintenance & Repairs", ago:26, status:"resolved", priority:"urgent", assignee:"Lucía Romero",
-  description:"Toda la línea de unidades quedó sin agua caliente después del service de la caldera.",
-  notes:[{ago:26,text:"La empresa de service volvió el mismo día."},{ago:25,text:"Cambiaron una válvula fallada, volvió el agua caliente. Confirmado con las cuatro unidades afectadas."}]},
-
- {customer:"Alejandro Quiroga", email:"aquiroga@correo.com", phone:"+54 11 5522-6690", location:"ALEM 135 — 4D", category:"Fees & Payments", ago:38, status:"progress", priority:"medium", assignee:"Diego Giussani",
-  description:"Dice que un pago hecho el día 3 nunca se acreditó en su cuenta y le figura como deuda.",
-  notes:[{ago:36,text:"Le pedí el comprobante de la transferencia."},{ago:30,text:"Llegó el comprobante; lo estoy cruzando con el extracto — el número de referencia no coincide con ningún movimiento."},{ago:12,text:"El banco está rastreando la transferencia. Todavía sin respuesta."}]},
-
- {customer:"Verónica Ledesma", email:"v.ledesma@correo.com", phone:"+54 11 4966-0327", location:"URQUIZA 1661 — 3B", category:"Other", ago:1, status:"open", priority:"medium", assignee:"Diego Giussani",
-  description:"Pide una copia de la póliza de seguro del edificio y su fecha de vencimiento antes de firmar un contrato de alquiler.",
-  notes:[]},
-
- {customer:"Mariano Otero", email:"m.otero@correo.com", phone:"+54 11 5177-4408", location:"JARAMILLO 1838 — 4A", category:"Noise & Neighbors", ago:13, status:"progress", priority:"high", assignee:"Pablo Sosa",
-  description:"Perro que queda solo y ladra casi todo el día durante la semana. Se quejaron varios vecinos de la misma línea.",
-  notes:[{ago:12,text:"Carta al propietario citando el reglamento interno."},{ago:5,text:"La propietaria respondió, dice que está consiguiendo un paseador. Retomo en dos semanas."}]},
-
- {customer:"Luisa Bermúdez", email:"l.bermudez@correo.com", phone:"+54 11 4390-8821", location:"ALEM 135 — 1C", category:"Cleaning", ago:45, status:"resolved", priority:"low", assignee:"Pablo Sosa",
-  description:"Las ventanas de la escalera no se limpiaban hacía meses.",
-  notes:[{ago:40,text:"Lo sumé al cronograma de limpieza profunda trimestral."},{ago:33,text:"Hecho. La vecina agradeció a la administración."}]},
-
- {customer:"Carlos Ibarra", email:"c.ibarra@correo.com", phone:"+54 11 4801-5573", location:"URQUIZA 1661 — 2B", category:"Maintenance & Repairs", ago:7, status:"open", priority:"high", assignee:"Lucía Romero",
-  description:"Mancha de humedad que avanza en la pared del dormitorio, pared medianera con la sala de tanques. Empeora después de la lluvia.",
-  notes:[{ago:6,text:"El vecino mandó fotos. Hay que llamar a un especialista en impermeabilización."}]},
-
- {customer:"Sofía Arrieta", email:"s.arrieta@correo.com", phone:"+54 11 6288-1194", location:"JARAMILLO 1838 — 2B", category:"Common Areas", ago:19, status:"open", priority:"low", assignee:"Pablo Sosa",
-  description:"Dos de las cuatro luces del subsuelo están quemadas; el rincón del fondo queda muy oscuro de noche.",
-  notes:[]},
-
- {customer:"Ricardo Maidana", email:"r.maidana@correo.com", phone:"+54 11 4573-2286", location:"ALEM 135 — 6A", category:"Security", ago:34, status:"resolved", priority:"medium", assignee:"Diego Giussani",
-  description:"El portero eléctrico no funciona en su unidad, estuvo una semana sin poder abrir para las entregas.",
-  notes:[{ago:32,text:"Vino el técnico y cambió el auricular."},{ago:31,text:"Funciona bien. Reclamo cerrado."}]},
-
- {customer:"Norma Cabrera", email:"n.cabrera@correo.com", phone:"+54 11 4019-7735", location:"URQUIZA 1661 — 5D", category:"Fees & Payments", ago:10, status:"open", priority:"high", assignee:"Diego Giussani",
-  description:"Le cobraron recargo por pago fuera de término aunque la liquidación llegó cuatro días después del vencimiento. Pide que se le saque el recargo.",
-  notes:[{ago:9,text:"Estoy verificando la fecha de distribución de las liquidaciones del mes pasado."}]},
-
- {customer:"Damián Sequeira", email:"d.sequeira@correo.com", phone:"+54 11 5844-6601", location:"JARAMILLO 1838 — PB", category:"Other", ago:23, status:"progress", priority:"medium", assignee:"Lucía Romero",
-  description:"Pide autorización para instalar un bicicletero en el hall de entrada y pregunta cuál es el procedimiento en la asamblea.",
-  notes:[{ago:21,text:"Le expliqué que tiene que tratarse en la próxima asamblea. Lo sumé al orden del día."}]}
-];
-
-/* ================= state ================= */
-let tickets = [];
-/* mode = which pane is on screen; the rest are filters shared by the dashboard and the ticket list */
-let ui = { q:"", mode:"dashboard", view:"all", priority:"all", category:"all", assignee:"all", building:"all",
-           sort:"new", selected:null };
-
-/* ================= storage =================
-   load() y save() ya no existen: los reemplazan pull() y pushTicket(),
-   definidos en la seccion "backend" de arriba. */
-/* tickets saved by an earlier version may be missing newer fields */
-function migrate(t){
-  if(!t.notes) t.notes = [];
-  if(t.status === "resolved" && !t.resolvedAt){
-    t.resolvedAt = t.notes.length ? t.notes[t.notes.length-1].at : t.submitted;
-  }
-  if(t.status !== "resolved" && t.resolvedAt) delete t.resolvedAt;
+  if (r.resolvedAt) t.resolvedAt = String(r.resolvedAt);
+  // El cliente necesita estos dos para detectar conflictos y avisar quien toco que.
+  t.updated_at = String(r.updated_at || '');
+  t.updated_by = String(r.updated_by || '');
   return t;
 }
-function seed(){
-  return SAMPLE.map(function(s,i){
-    const t = {
-      id:"TF-"+String(1001+i), customer:s.customer, email:s.email, phone:s.phone,
-      location:s.location, category:s.category, submitted:daysAgoISO(s.ago),
-      status:s.status, priority:s.priority, assignee:s.assignee, description:s.description,
-      notes:s.notes.map(function(n){ return {at:daysAgoISO(n.ago), text:n.text}; })
-    };
-    /* a resolved sample closed on the date of its last note */
-    if(t.status === "resolved") t.resolvedAt = t.notes.length ? t.notes[t.notes.length-1].at : t.submitted;
-    return t;
-  });
+
+function _aFila(t, user, existente) {
+  // updated_at / updated_by los pone siempre el servidor, nunca el cliente.
+  const ahora = new Date().toISOString();
+  const v = {
+    id: t.id || (existente ? existente.id : ''),
+    customer: t.customer || '', email: t.email || '', phone: t.phone || '',
+    location: t.location || '', category: t.category || '',
+    submitted: String(t.submitted || '').slice(0, 10),
+    status: t.status || 'open', priority: t.priority || 'medium',
+    assignee: t.assignee || '', description: t.description || '',
+    // Si el cliente no mando titulo (alta vieja, o un cliente sin la version
+    // nueva), lo arma el servidor. Asi ninguna fila queda sin titulo.
+    titulo: String(t.titulo || '').trim() || tituloAuto(t.description || ''),
+    notes: JSON.stringify(t.notes || []),
+    resolvedAt: t.resolvedAt || '',
+    updated_at: ahora, updated_by: user.nombre || user.usuario,
+    activo: true
+  };
+  return COLS.map(c => v[c]);
 }
 
-/* ================= dates ================= */
-function daysAgoISO(d){ const t=new Date(); t.setHours(12,0,0,0); t.setDate(t.getDate()-d); return t.toISOString().slice(0,10); }
-function todayISO(){ const t=new Date(); t.setHours(12,0,0,0); return t.toISOString().slice(0,10); }
-function ageDays(iso){
-  const a=new Date(iso+"T12:00:00"); const b=new Date(); b.setHours(12,0,0,0);
-  return Math.max(0, Math.round((b-a)/86400000));
-}
-function fmtDate(iso){ const d=new Date(iso.length>10?iso:iso+"T12:00:00"); return isNaN(d)?iso:d.toLocaleDateString("es-AR",{day:"numeric",month:"short",year:"numeric"}); }
-function fmtShort(iso){ const d=new Date(iso.length>10?iso:iso+"T12:00:00"); return isNaN(d)?iso:d.toLocaleDateString("es-AR",{day:"numeric",month:"short"}); }
-function ageLabel(n){ return n===0?"Hoy":(n===1?"1 día":n+" días"); }
-function isOverdue(t){ return t.status!=="resolved" && ageDays(t.submitted) > pri(t.priority).days; }
-function daysBetween(fromISO, toISO){
-  const a = new Date(String(fromISO).slice(0,10)+"T12:00:00");
-  const b = new Date(String(toISO).slice(0,10)+"T12:00:00");
-  if(isNaN(a)||isNaN(b)) return 0;
-  return Math.max(0, Math.round((b-a)/86400000));
+
+// ============================================================
+// TITULO AUTOMATICO
+// ============================================================
+// El titulo sale del texto del reclamo por diccionario de palabras clave: gana
+// la primera regla que matchea, y las mas urgentes o mas especificas estan
+// primero. Si no matchea ninguna, cae al resumen de la primera frase.
+//
+// OJO: esta misma tabla esta repetida, identica, en TicketFlow.html y en
+// movil.html (los clientes la necesitan para mostrar el titulo antes de
+// guardar y para los tickets viejos). Si tocas una regla, tocala en los tres.
+// El texto se compara en minusculas y SIN acentos (_norm), por eso las reglas
+// se escriben sin acentos: 'filtracion', 'bano', 'electric'.
+
+function _norm(s) {
+  return String(s || '').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
-/* ================= edificios, unidad y titulo =================
-   Padron de respaldo. La lista de verdad sale de la hoja `Edificios` de la
-   planilla y llega con cada `listar`; esto es lo que se usa si todavia no
-   corriste actualizar() en el backend, o si la hoja quedo vacia.            */
-const EDIFICIOS_FIJOS = [
-  "ALBARELLOS 160","ALEM 135","ALEM 175","ALTOS DE LA MERCED","ANCHORENA 1720",
-  "ARENALES 2645","AVELLANEDA 350","AYACUCHO 1466","CONSTITUCION 2889",
-  "DIEGO PALMA 232","ELCANO 2845","ESPA\u00d1A 385","ITUZAINGO 119","JARAMILLO 1838",
-  "LIBERTADOR 13131","MANUELA PEDRAZA 1770","MARTIN Y OMAR 132","PERON 3050",
-  "QUARTIER POLO","RIVADAVIA 27","URQUIZA 1661"
-];
-let edificiosSrv = [];                     /* lo ultimo que mando el servidor */
-
-/* Para los desplegables de alta y de edicion: el padron, mas el edificio que
-   ya tenga el ticket que estoy editando (para no perderlo si es uno viejo). */
-function listaEdificios(extra){
-  const s = {};
-  (edificiosSrv.length ? edificiosSrv : EDIFICIOS_FIJOS).forEach(function(b){ if(b) s[b]=1; });
-  if(extra) s[extra] = 1;
-  return Object.keys(s).sort(function(a,b){ return a.localeCompare(b,"es"); });
-}
-
-/* "ALEM 135 \u2014 3A" -> {edificio:"ALEM 135", unidad:"3A"}
-   Sirve tambien para lo cargado a mano antes, con guion o sin separador.   */
-function partirLoc(loc){
-  const s = String(loc==null?"":loc).trim();
-  if(!s) return {edificio:"", unidad:""};
-  let i = s.search(/[\u2014\u2013]/), largo = 1;
-  if(i < 0){ i = s.indexOf(" - "); largo = 3; }
-  if(i < 0) return {edificio:s, unidad:""};
-  return {edificio:s.slice(0,i).trim(), unidad:s.slice(i+largo).trim()};
-}
-function armarLoc(ed, un){
-  ed = String(ed==null?"":ed).trim();
-  un = String(un==null?"":un).trim();
-  return un ? (ed + " \u2014 " + un) : ed;
-}
-function optsEdificio(elegido){
-  return '<option value="">\u2014 Eleg\u00ed el edificio \u2014</option>'
-    + listaEdificios(elegido).map(function(b){
-        return '<option value="'+esc(b)+'"'+(b===elegido?" selected":"")+'>'+esc(b)+'</option>';
-      }).join("");
-}
-
-/* ---- titulo automatico ----
-   Diccionario de palabras clave: gana la primera regla que matchea, y las mas
-   urgentes o especificas estan primero. Si no matchea ninguna, resume la
-   primera frase del reclamo.
-
-   OJO: esta tabla esta repetida, identica, en Codigo.gs, TicketFlow.html y
-   movil.html. Si tocas una regla, tocala en los tres. El texto se compara en
-   minusculas y sin acentos (normTxt), por eso las reglas van sin acentos.   */
-function normTxt(s){
-  return String(s==null?"":s).toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-}
 const REGLAS_TITULO = [
-  [/olor a gas|escape de gas|fuga de gas|perdida de gas|\bgas\b/, "P\u00e9rdida de gas"],
-  [/incendio|matafuego|extintor|\bhumo\b/,                        "Incendio / matafuegos"],
-  [/ascensor|montacarga|elevador/,                                "Ascensor"],
-  [/agua caliente|caldera|termotanque|calefacc|radiador/,          "Agua caliente / caldera"],
-  [/filtrac|gotera|gotea|se llueve|infiltra|perdida de agua|se moja|chorrea/, "Filtraci\u00f3n de agua"],
-  [/humedad|moho|hongo/,                                          "Humedad"],
-  [/sin agua|falta de agua|no hay agua|presion de agua|tanque|\bbomba|cisterna/, "Falta de agua"],
-  [/cloaca|desagu|desagot|tapad|destap|rejilla|pluvial|inodoro|\bcano|caneria|desborde/, "Desag\u00fce tapado"],
-  [/portero|timbre|intercomunicador|citofono/,                    "Portero el\u00e9ctrico"],
-  [/\bluz\b|\bluces|lampara|\bfoco|iluminac|electric|\btablero|disyuntor|termica|cortocircuito|apagon|enchufe/, "Problema el\u00e9ctrico"],
-  [/cerradura|cerrajer|\bllave|porton|puerta|picaporte|bisagra/,   "Puerta / cerradura"],
-  [/vidrio|ventana|persiana|abertura|mosquitero/,                 "Vidrios / aberturas"],
-  [/plaga|cucaracha|\brata|\braton|fumigac|paloma|insecto|hormiga|termita/, "Plagas"],
-  [/camara|seguridad|\brobo|hurto|vandalismo|intruso|\breja/,      "Seguridad"],
-  [/basura|residuo|suciedad|limpieza|\bsucio|mugre|\bolor/,        "Limpieza"],
-  [/ruido|musica|fiesta|griter|\bobra\b|martill|taladr/,           "Ruidos molestos"],
-  [/grieta|rajadura|revoque|mamposter|pintura|pintar|cielorraso|\btecho|desprend|azulejo/, "Pintura / alba\u00f1iler\u00eda"],
-  [/expensa|deuda|recibo|liquidac|\bpago|\bcuota|interes|moroso/,   "Expensas"],
-  [/\bsplit|aire acondicionado|climatiz|ventilac|extractor/,       "Climatizaci\u00f3n"],
-  [/cochera|garage|garaje|estacionamiento/,                       "Cochera"],
-  [/palier|\bhall\b|terraza|azotea|\bpatio|\bsum\b|pileta|laundry/, "Espacio com\u00fan"],
-  [/antena|\bcable|internet|wifi|fibra optica/,                   "Antena / cableado"],
-  [/poliza|seguro del|siniestro/,                                 "Seguro del edificio"],
-  [/mascota|\bperro|\bgato/,                                      "Convivencia / mascotas"]
+  [/olor a gas|escape de gas|fuga de gas|perdida de gas|\bgas\b/, 'Pérdida de gas'],
+  [/incendio|matafuego|extintor|\bhumo\b/,                        'Incendio / matafuegos'],
+  [/ascensor|montacarga|elevador/,                                'Ascensor'],
+  [/agua caliente|caldera|termotanque|calefacc|radiador/,          'Agua caliente / caldera'],
+  [/filtrac|gotera|gotea|se llueve|infiltra|perdida de agua|se moja|chorrea/, 'Filtración de agua'],
+  [/humedad|moho|hongo/,                                          'Humedad'],
+  [/sin agua|falta de agua|no hay agua|presion de agua|tanque|\bbomba|cisterna/, 'Falta de agua'],
+  [/cloaca|desagu|desagot|tapad|destap|rejilla|pluvial|inodoro|\bcano|caneria|desborde/, 'Desagüe tapado'],
+  [/portero|timbre|intercomunicador|citofono/,                    'Portero eléctrico'],
+  [/\bluz\b|\bluces|lampara|\bfoco|iluminac|electric|\btablero|disyuntor|termica|cortocircuito|apagon|enchufe/, 'Problema eléctrico'],
+  [/cerradura|cerrajer|\bllave|porton|puerta|picaporte|bisagra/,   'Puerta / cerradura'],
+  [/vidrio|ventana|persiana|abertura|mosquitero/,                 'Vidrios / aberturas'],
+  [/plaga|cucaracha|\brata|\braton|fumigac|paloma|insecto|hormiga|termita/, 'Plagas'],
+  [/camara|seguridad|\brobo|hurto|vandalismo|intruso|\breja/,      'Seguridad'],
+  [/basura|residuo|suciedad|limpieza|\bsucio|mugre|\bolor/,        'Limpieza'],
+  [/ruido|musica|fiesta|griter|\bobra\b|martill|taladr/,           'Ruidos molestos'],
+  [/grieta|rajadura|revoque|mamposter|pintura|pintar|cielorraso|\btecho|desprend|azulejo/, 'Pintura / albañilería'],
+  [/expensa|deuda|recibo|liquidac|\bpago|\bcuota|interes|moroso/,   'Expensas'],
+  [/\bsplit|aire acondicionado|climatiz|ventilac|extractor/,       'Climatización'],
+  [/cochera|garage|garaje|estacionamiento/,                       'Cochera'],
+  [/palier|\bhall\b|terraza|azotea|\bpatio|\bsum\b|pileta|laundry/, 'Espacio común'],
+  [/antena|\bcable|internet|wifi|fibra optica/,                   'Antena / cableado'],
+  [/poliza|seguro del|siniestro/,                                 'Seguro del edificio'],
+  [/mascota|\bperro|\bgato/,                                      'Convivencia / mascotas']
 ];
-function tituloAuto(desc){
-  const texto = String(desc==null?"":desc).replace(/\s+/g," ").trim();
-  if(!texto) return "Reclamo sin descripci\u00f3n";
-  const n = normTxt(texto);
-  for(let i=0;i<REGLAS_TITULO.length;i++){
-    if(REGLAS_TITULO[i][0].test(n)) return REGLAS_TITULO[i][1];
+
+function tituloAuto(desc) {
+  const texto = String(desc || '').replace(/\s+/g, ' ').trim();
+  if (!texto) return 'Reclamo sin descripción';
+  const n = _norm(texto);
+  for (let i = 0; i < REGLAS_TITULO.length; i++) {
+    if (REGLAS_TITULO[i][0].test(n)) return REGLAS_TITULO[i][1];
   }
   const frase = (texto.split(/[.;\n]/)[0] || texto).trim();
-  const palabras = frase.split(" ");
-  const corto = palabras.slice(0,7).join(" ").replace(/[,:;\-\u2013\u2014]+$/,"");
-  return corto.charAt(0).toUpperCase() + corto.slice(1) + (palabras.length>7 ? "\u2026" : "");
-}
-/* El titulo guardado manda; si el ticket es viejo y no tiene, se deriva. */
-function tituloDe(t){
-  return String(t.titulo==null?"":t.titulo).trim() || tituloAuto(t.description);
+  const palabras = frase.split(' ');
+  const corto = palabras.slice(0, 7).join(' ').replace(/[,:;\-\u2013\u2014]+$/, '');
+  return corto.charAt(0).toUpperCase() + corto.slice(1) + (palabras.length > 7 ? '\u2026' : '');
 }
 
-function buildingOf(t){ return partirLoc(t.location).edificio || "Sin especificar"; }
-function unitOf(t){ return partirLoc(t.location).unidad; }
-function lastUpdate(t){
-  const n=(t.notes||[]);
-  if(!n.length) return t.submitted;
-  return n.map(x=>x.at).sort().pop();
+// ============================================================
+// DATOS
+// ============================================================
+
+function _ss() { return SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID); }
+
+function _hoja(n) {
+  const h = _ss().getSheetByName(n);
+  if (!h) throw new Error('Falta la hoja: ' + n);
+  return h;
 }
 
-/* ================= helpers ================= */
-const $  = s => document.querySelector(s);
-const $$ = s => Array.prototype.slice.call(document.querySelectorAll(s));
-function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-const NOBODY = "__none__";  /* stands in for an unassigned ticket, so it can be filtered like any other */
-function assigneeKey(t){ return t.assignee ? t.assignee : NOBODY; }
-function assigneeLabel(k){ return k===NOBODY ? "Sin asignar" : k; }
-function assignees(){
-  const m={};
-  tickets.forEach(t=>{ const k=assigneeKey(t); m[k]=(m[k]||0)+1; });
-  return m;
+function _leer(nombre, cols) {
+  const hoja = _hoja(nombre);
+  const last = hoja.getLastRow();
+  if (last < 2) return [];
+  // Si la hoja todavia es mas angosta que COLS (falta correr actualizar()),
+  // leemos lo que hay y el resto queda vacio, en vez de reventar la app.
+  const ancho = Math.min(cols.length, hoja.getMaxColumns());
+  const vals = hoja.getRange(2, 1, last - 1, ancho).getValues();
+  const out = [];
+  for (let i = 0; i < vals.length; i++) {
+    if (vals[i].every(c => c === '')) continue;
+    const o = { _row: i + 2 };
+    cols.forEach((c, j) => {
+      let v = j < ancho ? vals[i][j] : '';
+      if (v instanceof Date) v = v.toISOString();
+      o[c] = v;
+    });
+    out.push(o);
+  }
+  return out;
 }
-/* primero los nombres reales, "Sin asignar" al final */
-function assigneeKeys(){
-  return Object.keys(assignees()).sort(function(a,b){
-    if(a===NOBODY) return 1;
-    if(b===NOBODY) return -1;
-    return a.localeCompare(b);
+
+function _tickets()  { return _leer('Tickets', COLS); }
+
+/** Ensancha la hoja si le faltan columnas, asi un setValues nunca se cae. */
+function _asegurarAncho(hoja, n) {
+  const faltan = n - hoja.getMaxColumns();
+  if (faltan > 0) hoja.insertColumnsAfter(hoja.getMaxColumns(), faltan);
+  return hoja;
+}
+
+/**
+ * Nombres de los edificios activos, en orden alfabetico.
+ * Si la hoja todavia no existe (planilla vieja, sin correr actualizar()),
+ * devuelve la carga inicial en vez de romper la app.
+ */
+function _edificios() {
+  const hoja = _ss().getSheetByName('Edificios');
+  if (!hoja) return EDIFICIOS_SEED.slice();
+  const filas = _leer('Edificios', COLS_EDIFICIOS);
+  const out = filas
+    .filter(f => String(f.activo).toUpperCase() !== 'FALSE' && f.activo !== false)
+    .map(f => String(f.nombre || '').trim())
+    .filter(n => n);
+  return out.length ? out.sort() : EDIFICIOS_SEED.slice();
+}
+function _usuarios() { return _leer('Usuarios', COLS_USUARIOS); }
+
+function _setUsuario(row, cambios) {
+  const hoja = _hoja('Usuarios');
+  Object.keys(cambios).forEach(k => {
+    const i = COLS_USUARIOS.indexOf(k);
+    if (i >= 0) hoja.getRange(row, i + 1).setValue(cambios[k]);
   });
 }
-function buildings(){ const s={}; tickets.forEach(t=>{ s[buildingOf(t)]=1; }); return Object.keys(s).sort(); }
-function nextId(){
-  let max=1000;
-  tickets.forEach(t=>{ const n=parseInt(String(t.id).replace(/\D/g,""),10); if(!isNaN(n)&&n>max) max=n; });
-  return "TF-"+(max+1);
-}
-let toastTimer;
-function toast(msg){
-  const el=$("#toast"); el.textContent=msg; el.classList.add("on");
-  clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.classList.remove("on"),2000);
-}
-const isNarrow = () => window.matchMedia("(max-width:780px)").matches;
 
-/* ================= views ================= */
-const VIEWS = [
-  {id:"all",      label:"Todos los tickets",  icon:"all",      test:()=>true},
-  {id:"open",     label:"Abiertos",           icon:"open",     test:t=>t.status==="open"},
-  {id:"progress", label:"En curso",           icon:"progress", test:t=>t.status==="progress"},
-  {id:"resolved", label:"Resueltos",          icon:"resolved", test:t=>t.status==="resolved"},
-  {id:"highpri",  label:"Prioridad alta",     icon:"highpri",  test:t=>t.status!=="resolved" && (t.priority==="urgent"||t.priority==="high")},
-  {id:"attn",     label:"Necesitan atención", icon:"attn",     test:t=>isOverdue(t), alert:true}
-];
-/* se llega tocando un KPI, no aparecen en la barra lateral */
-const EXTRA_VIEWS = [
-  {id:"active",     label:"Reclamos activos", test:t=>t.status!=="resolved"},
-  {id:"resolved30", label:"Resueltos en los últimos 30 días",
-                    test:t=>t.status==="resolved" && t.resolvedAt && ageDays(String(t.resolvedAt).slice(0,10))<=30},
-  {id:"stale",      label:"Abiertos hace 30 días o más", test:t=>t.status!=="resolved" && ageDays(t.submitted)>=30}
-];
-const ALL_VIEWS = VIEWS.concat(EXTRA_VIEWS);
-const viewOf = id => ALL_VIEWS.find(v=>v.id===id) || VIEWS[0];
+function _activo(r) {
+  return !(r.activo === false || String(r.activo).toUpperCase() === 'FALSE');
+}
 
-/* The five filter dimensions. `exclude` leaves one of them out, which is how each
-   dashboard panel shows its own alternatives instead of only the slice already chosen. */
-const DIMS = ["view","priority","category","assignee","building"];
-function subset(exclude){
-  return tickets.filter(function(t){
-    if(exclude!=="view"     && !viewOf(ui.view).test(t)) return false;
-    if(exclude!=="priority" && ui.priority!=="all" && t.priority!==ui.priority) return false;
-    if(exclude!=="category" && ui.category!=="all" && t.category!==ui.category) return false;
-    if(exclude!=="assignee" && ui.assignee!=="all" && assigneeKey(t)!==ui.assignee) return false;
-    if(exclude!=="building" && ui.building!=="all" && buildingOf(t)!==ui.building) return false;
-    return true;
+function _nuevoId(filas) {
+  let max = 1000;
+  filas.forEach(r => {
+    const n = parseInt(String(r.id).replace(/\D/g, ''), 10);
+    if (!isNaN(n) && n > max) max = n;
   });
+  return 'TF-' + (max + 1);
 }
-function scoped(){ return subset(null); }
-function anyFilter(){ return DIMS.some(d => ui[d] !== "all"); }
 
-function matches(t){
-  if(!viewOf(ui.view).test(t)) return false;
-  if(ui.priority!=="all" && t.priority!==ui.priority) return false;
-  if(ui.category!=="all" && t.category!==ui.category) return false;
-  if(ui.assignee!=="all" && assigneeKey(t)!==ui.assignee) return false;
-  if(ui.building!=="all" && buildingOf(t)!==ui.building) return false;
-  const q = ui.q.trim().toLowerCase();
-  if(q){
-    const hay=[t.id,t.customer,t.email,t.phone,t.location,tituloDe(t),t.category,t.assignee,t.description]
-      .concat((t.notes||[]).map(n=>n.text)).join(" ").toLowerCase();
-    if(hay.indexOf(q)===-1) return false;
+// ============================================================
+// IDEMPOTENCIA DE ALTAS
+// Mapea el id provisional del cliente (TMP-…) al id definitivo. Vive en las
+// propiedades del script, no en la planilla: no hace falta migrar ni agregar
+// columnas, y sobrevive a que se duerma la pestana del celular.
+// ============================================================
+
+function _claveAlta(tmp) {
+  return 'alta_' + String(tmp).slice(0, 60);
+}
+function _altaPrevia(tmp) {
+  return PropertiesService.getScriptProperties().getProperty(_claveAlta(tmp));
+}
+function _marcarAlta(tmp, idFinal) {
+  try {
+    PropertiesService.getScriptProperties().setProperty(_claveAlta(tmp), String(idFinal));
+  } catch (e) { /* si se llena, el alta ya quedo guardada igual */ }
+}
+function _olvidarAlta(tmp) {
+  try {
+    PropertiesService.getScriptProperties().deleteProperty(_claveAlta(tmp));
+  } catch (e) {}
+}
+
+/**
+ * Borra las marcas de mas de 7 dias. El id provisional trae el timestamp adentro
+ * (TMP-<ms>-<azar>), asi que la edad se lee de la llave misma.
+ * Corre sola desde limpiarTokens si le pusiste el trigger diario.
+ */
+function limpiarAltas() {
+  const props = PropertiesService.getScriptProperties();
+  const todas = props.getProperties();
+  const corte = Date.now() - 7 * 24 * 3600e3;
+  let borradas = 0;
+  Object.keys(todas).forEach(function (k) {
+    if (k.indexOf('alta_TMP-') !== 0) return;
+    const ms = parseInt(k.split('-')[1], 10);
+    if (!isNaN(ms) && ms < corte) { props.deleteProperty(k); borradas++; }
+  });
+  Logger.log('Marcas de alta borradas: ' + borradas);
+  return borradas;
+}
+
+/** Sello de versión barato: el cliente lo consulta para saber si alguien cambió algo. */
+function _stamp() {
+  return PropertiesService.getScriptProperties().getProperty('STAMP') || '0';
+}
+function _tocar() {
+  // Contador, no timestamp: dos escrituras en el mismo milisegundo darían el
+  // mismo sello y algún cliente se perdería la actualización.
+  const p = PropertiesService.getScriptProperties();
+  p.setProperty('STAMP', String(Number(p.getProperty('STAMP') || 0) + 1));
+}
+
+function _log(ticketId, user, accion, campo, antes, despues) {
+  try {
+    _hoja('Historial').appendRow([
+      new Date().toISOString(), ticketId, user.nombre || user.usuario,
+      accion, campo || '',
+      antes == null ? '' : String(antes).slice(0, 500),
+      despues == null ? '' : String(despues).slice(0, 500)
+    ]);
+  } catch (e) { /* el log nunca debe romper la operación */ }
+}
+
+function _logCambios(antes, despues, user) {
+  const vigilados = ['status', 'priority', 'assignee', 'category', 'customer', 'location', 'description', 'titulo'];
+  vigilados.forEach(c => {
+    const a = String(antes[c] == null ? '' : antes[c]);
+    const b = String(despues[c] == null ? '' : despues[c]);
+    if (a !== b) _log(antes.id, user, 'cambio', c, a, b);
+  });
+  let nA = 0;
+  try { nA = (JSON.parse(antes.notes || '[]') || []).length; } catch (e) { nA = 0; }
+  const nB = (despues.notes || []).length;
+  if (nB > nA) {
+    const ult = despues.notes[nB - 1];
+    _log(antes.id, user, 'agrego nota', '', '', ult && ult.text);
+  }
+}
+
+function _json(o) {
+  return ContentService.createTextOutput(JSON.stringify(o))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ============================================================
+// INSTALACIÓN — correr una vez desde el editor
+// ============================================================
+
+function instalar() {
+  const ss = _ss();
+  const props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('SALT')) {
+    props.setProperty('SALT', Utilities.getUuid() + Utilities.getUuid());
+  }
+  _tocar();
+
+  const hojas = {
+    Tickets: COLS, Usuarios: COLS_USUARIOS,
+    Historial: COLS_HISTORIAL, Presencia: COLS_PRESENCIA,
+    Edificios: COLS_EDIFICIOS
+  };
+  Object.keys(hojas).forEach(nombre => {
+    const h = ss.getSheetByName(nombre) || ss.insertSheet(nombre);
+    const cols = hojas[nombre];
+    h.getRange(1, 1, 1, cols.length).setValues([cols])
+      .setFontWeight('bold').setBackground('#1f2937').setFontColor('#ffffff');
+    h.setFrozenRows(1);
+  });
+
+  _sembrarEdificios();
+  Logger.log('Listo. Ahora corre crearUsuario().');
+}
+
+/**
+ * Carga inicial de la hoja Edificios. No pisa nada: si la hoja ya tiene
+ * filas, no toca ninguna.
+ */
+function _sembrarEdificios() {
+  const h = _ss().getSheetByName('Edificios');
+  if (!h || h.getLastRow() > 1) return 0;
+  const filas = EDIFICIOS_SEED.map(n => [n, true]);
+  h.getRange(2, 1, filas.length, 2).setValues(filas);
+  return filas.length;
+}
+
+/**
+ * MIGRACION — correr UNA vez desde el editor sobre una planilla que ya
+ * estaba andando. Es idempotente: se puede correr de nuevo sin romper nada.
+ *
+ *   1. agrega el encabezado `titulo` en la columna 17 de Tickets
+ *   2. crea la hoja Edificios y la siembra con EDIFICIOS_SEED
+ *   3. le pone titulo a los reclamos que ya estan cargados
+ */
+function actualizar() {
+  const ss = _ss();
+
+  // 1. encabezado nuevo
+  const tk = _asegurarAncho(_hoja('Tickets'), COLS.length);
+  tk.getRange(1, 1, 1, COLS.length).setValues([COLS])
+    .setFontWeight('bold').setBackground('#1f2937').setFontColor('#ffffff');
+  tk.setFrozenRows(1);
+
+  // 2. hoja de edificios
+  let ed = ss.getSheetByName('Edificios');
+  if (!ed) ed = ss.insertSheet('Edificios');
+  ed.getRange(1, 1, 1, COLS_EDIFICIOS.length).setValues([COLS_EDIFICIOS])
+    .setFontWeight('bold').setBackground('#1f2937').setFontColor('#ffffff');
+  ed.setFrozenRows(1);
+  const sembrados = _sembrarEdificios();
+
+  // 3. titulos de lo que ya estaba cargado. Se escribe la columna entera de una
+  //    sola vez: fila por fila, con cientos de tickets, se come el tiempo de
+  //    ejecucion que da Apps Script.
+  const col  = COLS.indexOf('titulo') + 1;
+  const last = tk.getLastRow();
+  let puestos = 0;
+  if (last > 1) {
+    const descs = tk.getRange(2, COLS.indexOf('description') + 1, last - 1, 1).getValues();
+    const tits  = tk.getRange(2, col, last - 1, 1).getValues();
+    const salida = tits.map((fila, i) => {
+      const actual = String(fila[0] || '').trim();
+      if (actual) return [actual];                 // titulo puesto a mano: no se pisa
+      const d = String(descs[i][0] || '').trim();
+      if (!d) return [''];                         // fila vacia
+      puestos++;
+      return [tituloAuto(d)];
+    });
+    tk.getRange(2, col, salida.length, 1).setValues(salida);
+  }
+
+  _tocar();
+  Logger.log('Listo. Edificios sembrados: ' + sembrados + '. Titulos puestos: ' + puestos + '.');
+}
+
+/** Editá los valores, ejecutá, y después BORRÁ el PIN de este archivo. */
+function crearUsuario() {
+  // `usuario` es con lo que se entra: puede ser un mail o un nombre suelto.
+  // `nombre` es como firma en el historial y en los avisos de presencia:
+  // tiene que ser unico, porque la presencia se lleva por nombre.
+  const usuario  = 'diego';                      // <-- cambiar
+  const nombre   = 'Diego Giussani';             // <-- cambiar
+  const rol      = 'admin';                      // admin | operador | mantenimiento | lectura
+  const password = 'cambiar-esto-ya';            // <-- cambiar, despues borrar
+
+  const u = String(usuario).trim().toLowerCase();
+  if (!u || !nombre) throw new Error('usuario y nombre no pueden quedar vacíos');
+  if (_usuarios().some(x => String(x.usuario).trim().toLowerCase() === u)) {
+    throw new Error('Ya existe el usuario: ' + u);
+  }
+  if (_usuarios().some(x => String(x.nombre) === nombre)) {
+    throw new Error('Ya existe alguien con el nombre: ' + nombre);
+  }
+  _validarPassword(password);
+
+  _hoja('Usuarios').appendRow([
+    'U-' + Utilities.getUuid().slice(0, 8), u, nombre, rol, _hash(password), true, '', ''
+  ]);
+  Logger.log('Creado: ' + u + ' (' + rol + '). Borra la contrasena de este archivo.');
+}
+
+/** Cambiar la contrasena de alguien sin tocar el resto de la fila. */
+function cambiarPassword() {
+  const usuario = 'diego';                       // <-- cambiar
+  const nueva   = 'cambiar-esto-ya';             // <-- cambiar, despues borrar
+
+  const u = _usuarios().find(x =>
+    String(x.usuario).trim().toLowerCase() === String(usuario).trim().toLowerCase());
+  if (!u) throw new Error('No existe el usuario: ' + usuario);
+  _validarPassword(nueva);
+  // Vaciar el token cierra la sesion que esa persona tuviera abierta.
+  _setUsuario(u._row, { pass_hash: _hash(nueva), token: '', token_exp: '' });
+  CacheService.getScriptCache().remove('fail_' + String(usuario).trim().toLowerCase());
+  Logger.log('Contrasena cambiada para ' + usuario + '. Borrala de este archivo.');
+}
+
+/** Largo minimo y un par de descartes obvios. El largo es lo que importa. */
+function _validarPassword(p) {
+  const s = String(p || '');
+  if (s.length < LARGO_MINIMO) {
+    throw new Error('La contraseña tiene que tener al menos ' + LARGO_MINIMO + ' caracteres');
+  }
+  if (s !== s.trim()) throw new Error('La contraseña no puede empezar ni terminar con espacios');
+  const obvias = ['12345678', '123456789', 'password', 'contrasena', 'qwertyui', 'abcd1234'];
+  if (obvias.indexOf(s.toLowerCase()) !== -1 || /^(.)\1+$/.test(s)) {
+    throw new Error('Esa contraseña es de las primeras que prueba cualquiera. Usá otra.');
   }
   return true;
 }
-function visible(){
-  const list = tickets.filter(matches);
-  const rank = t => PRIORITIES.findIndex(p=>p.id===t.priority);
-  list.sort(function(a,b){
-    switch(ui.sort){
-      case "old":  return a.submitted<b.submitted?-1:(a.submitted>b.submitted?1:0);
-      case "pri":  return rank(a)-rank(b) || (a.submitted<b.submitted?1:-1);
-      case "age":  return ageDays(b.submitted)-ageDays(a.submitted);
-      case "name": return a.customer.localeCompare(b.customer);
-      default:     return a.submitted<b.submitted?1:(a.submitted>b.submitted?-1:0);
+
+/** Cuanto tarda el hash en TU cuenta. Si da mas de ~2000 ms, baja ITERACIONES. */
+function medirHash() {
+  const t0 = Date.now();
+  _hash('prueba-de-medicion');
+  const ms = Date.now() - t0;
+  Logger.log(ITERACIONES + ' iteraciones = ' + ms + ' ms por login.');
+  if (ms > 2000) Logger.log('Es lento: bajá ITERACIONES a ' + Math.floor(ITERACIONES * 1500 / ms));
+}
+
+/** Destraba a alguien bloqueado por intentos fallidos, sin esperar los 15 minutos. */
+function destrabarUsuario() {
+  const usuario = 'diego';    // <-- cambiar
+  CacheService.getScriptCache().remove('fail_' + String(usuario).trim().toLowerCase());
+  Logger.log('Destrabado: ' + usuario);
+}
+
+/** Opcional: trigger diario para limpiar tokens vencidos y marcas de alta viejas. */
+function limpiarTokens() {
+  _usuarios().forEach(u => {
+    if (u.token && new Date(u.token_exp) < new Date()) {
+      _setUsuario(u._row, { token: '', token_exp: '' });
     }
   });
-  return list;
+  limpiarAltas();
 }
 
-/* ================= render: sidebar ================= */
-function renderSide(){
-  let h = '<h2>General</h2>';
-  h += '<button class="nav'+(ui.mode==="dashboard"?" on":"")+'" data-mode="dashboard">'
-     + '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
-     + '<rect x="3" y="3" width="7.5" height="8.5" rx="1.6"/><rect x="13.5" y="3" width="7.5" height="5" rx="1.6"/>'
-     + '<rect x="13.5" y="11" width="7.5" height="10" rx="1.6"/><rect x="3" y="14.5" width="7.5" height="6.5" rx="1.6"/></svg>'
-     + '<span class="lbl">Panel</span></button>';
-
-  h += '<h2>Vistas</h2>';
-  VIEWS.forEach(function(v){
-    h += '<button class="nav'+(v.alert?" alertv":"")+(ui.view===v.id?" on":"")+'" data-view="'+v.id+'">'
-      + '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+ICONS[v.icon]+'</svg>'
-      + '<span class="lbl">'+v.label+'</span><span class="badge">'+countBy({view:v.id})+'</span></button>';
+/**
+ * Busca altas repetidas ya cargadas: mismo edificio/unidad, misma descripcion y
+ * misma fecha. NO borra nada, solo lista, para que decidas vos.
+ * Los duplicados que te quedaron de la prueba salen aca.
+ */
+function buscarDuplicados() {
+  const vistos = {};
+  const repes = [];
+  _tickets().filter(_activo).forEach(function (r) {
+    const llave = [String(r.location || '').trim().toLowerCase(),
+                   String(r.description || '').trim().toLowerCase(),
+                   String(r.submitted || '').slice(0, 10)].join('||');
+    if (vistos[llave]) repes.push({ id: r.id, original: vistos[llave], unidad: r.location });
+    else vistos[llave] = r.id;
   });
-
-  const catColors = ["var(--progress)","var(--open)","var(--resolved)","var(--accent)","var(--alert)","var(--text-2)","var(--text-3)"];
-  h += '<h2>Categorías</h2>';
-  h += '<button class="nav'+(ui.category==="all"?" on":"")+'" data-cat="all">'
-     + '<span class="swatch" style="background:var(--text-3)"></span><span class="lbl">Todas las categorías</span>'
-     + '<span class="badge">'+countBy({category:"all"})+'</span></button>';
-  CATEGORIES.forEach(function(c,i){
-    h += '<button class="nav'+(ui.category===c?" on":"")+'" data-cat="'+esc(c)+'" title="'+esc(catLabel(c))+'">'
-      + '<span class="swatch" style="background:'+catColors[i%catColors.length]+'"></span>'
-      + '<span class="lbl">'+esc(catLabel(c))+'</span><span class="badge">'+countBy({category:c})+'</span></button>';
-  });
-
-  h += '<h2>Edificio</h2>';
-  h += selectHTML("bldSel", ui.building,
-        [{v:"all", l:"Todos los edificios", n:countBy({building:"all"})}].concat(
-          buildings().map(b=>({v:b, l:b, n:countBy({building:b})}))));
-
-  h += '<h2>A cargo de</h2>';
-  h += selectHTML("whoSel", ui.assignee,
-        [{v:"all", l:"Todos", n:countBy({assignee:"all"})}].concat(
-          assigneeKeys().map(k=>({v:k, l:assigneeLabel(k), n:countBy({assignee:k})}))));
-
-  const keep = $("#side").scrollTop;
-  $("#side").innerHTML = h;
-  $("#side").scrollTop = keep;
+  Logger.log(repes.length
+    ? 'Repetidos (borralos desde la app): ' + JSON.stringify(repes, null, 2)
+    : 'No hay altas repetidas.');
+  return repes;
 }
-
-function selectHTML(id, current, opts){
-  return '<select class="side-sel'+(current!=="all"?" on":"")+'" id="'+id+'">'
-    + opts.map(function(o){
-        return '<option value="'+esc(o.v)+'"'+(current===o.v?" selected":"")+'>'
-          + esc(o.l)+' ('+o.n+')</option>';
-      }).join("")
-    + '</select>';
-}
-
-/* counts for one facet, holding the other filters steady */
-function countBy(o){
-  const view = o.view     !== undefined ? o.view     : ui.view;
-  const prio = o.priority !== undefined ? o.priority : ui.priority;
-  const cat  = o.category !== undefined ? o.category : ui.category;
-  const who  = o.assignee !== undefined ? o.assignee : ui.assignee;
-  const bld  = o.building !== undefined ? o.building : ui.building;
-  const test = viewOf(view).test;
-  return tickets.filter(function(t){
-    if(!test(t)) return false;
-    if(prio!=="all" && t.priority!==prio) return false;
-    if(cat!=="all" && t.category!==cat) return false;
-    if(who!=="all" && assigneeKey(t)!==who) return false;
-    if(bld!=="all" && buildingOf(t)!==bld) return false;
-    return true;
-  }).length;
-}
-
-/* ================= render: list ================= */
-function priHTML(id){
-  const p=pri(id); let bars="";
-  for(let i=1;i<=3;i++) bars += '<i class="'+(i<=p.bars?"f":"")+'"></i>';
-  return '<span class="pri '+p.id+'"><span class="bars">'+bars+'</span>'+p.label+'</span>';
-}
-const staHTML = id => '<span class="tag '+id+'">'+sta(id).label+'</span>';
-const LATE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5M12 16.2v.2"/></svg>';
-
-function renderList(){
-  const list = visible();
-  const v = viewOf(ui.view);
-  let title = v.label;
-  if(ui.category!=="all") title = catLabel(ui.category);
-  $("#listTitle").textContent = title;
-  $("#listTitle").title = title;
-
-  const bits = [];
-  bits.push(list.length + (list.length===1?" ticket":" tickets"));
-  if(ui.category!=="all" && ui.view!=="all") bits.push(v.label.toLowerCase());
-  if(ui.priority!=="all") bits.push("prioridad "+pri(ui.priority).label.toLowerCase());
-  if(ui.building!=="all") bits.push(ui.building);
-  if(ui.assignee!=="all") bits.push(assigneeLabel(ui.assignee));
-  const attn = list.filter(isOverdue).length;
-  if(attn) bits.push(attn+(attn===1?" necesita":" necesitan")+" atención");
-  $("#listCount").textContent = bits.join(" · ");
-
-  $("#list").innerHTML = list.length ? list.map(function(t){
-    const late = isOverdue(t);
-    return '<button class="item'+(ui.selected===t.id?" on":"")+'" data-id="'+esc(t.id)+'">'
-      + '<div class="item-top"><span class="name">'+esc(t.location||t.id)+'</span>'
-      + '<span class="when">'+fmtShort(t.submitted)+'</span></div>'
-      + '<div class="tit">'+esc(tituloDe(t))+'</div>'
-      + '<div class="snip">'+esc(t.description||"Sin descripción.")+'</div>'
-      + '<div class="item-foot">'+staHTML(t.status)+priHTML(t.priority)
-      + (late?'<span class="late">'+LATE_SVG+ageLabel(ageDays(t.submitted))+'</span>':'')
-      + '<span class="cat">'+esc(catLabel(t.category))+'</span>'
-      + (t.customer?'<span class="who">'+esc(t.customer)+'</span>':'')
-      + ((t.notes||[]).length?'<span class="dotnote" title="Tiene notas"></span>':'')
-      + '</div></button>';
-  }).join("") : '<div class="empty-list">Ningún ticket coincide con esta vista.</div>';
-}
-
-/* ================= render: detail ================= */
-function renderDetail(){
-  const box = $("#detailInner");
-  const t = tickets.find(x=>x.id===ui.selected);
-
-  if(!t){
-    box.innerHTML = '<div class="blank">'
-      + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">'
-      + '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg>'
-      + '<p>Elegí un ticket para ver el reclamo completo.</p></div>';
-    return;
-  }
-
-  const a = ageDays(t.submitted);
-  const late = isOverdue(t);
-
-  let h = '';
-
-  /* header */
-  h += '<div class="detail-head">'
-    + '<button class="btn icon ghost" id="backBtn" title="Volver a la lista" style="margin-top:2px">'
-    + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m14 6-6 6 6 6"/></svg></button>'
-    + '<div class="who"><h2>'+esc(t.location||"Sin unidad registrada")+'</h2>'
-    + '<div class="sub"><span>'+esc(tituloDe(t))+'</span><span>·</span><span>'+esc(t.id)+'</span>'
-    + '<span>·</span><span>'+esc(catLabel(t.category))+'</span></div></div>'
-    + '<div style="display:flex;gap:7px;align-items:center;flex:none">'+staHTML(t.status)+priHTML(t.priority)+'</div>'
-    + '</div>';
-
-  h += '<div class="detail-body"><div class="inner">';
-
-  if(late){
-    h += '<div class="banner">'
-      + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5M12 16.2v.2"/></svg>'
-      + '<div>Abierto hace <strong>'+ageLabel(a)+'</strong> — pasó el objetivo de '+pri(t.priority).days
-      + ' días para los reclamos de prioridad '+pri(t.priority).label.toLowerCase()+'.</div></div>';
-  }
-
-  /* key facts */
-  h += '<div class="panel"><div class="panel-b"><div class="factrow">'
-    + '<div class="fact"><div class="k">Ingresado</div><div class="v">'+fmtDate(t.submitted)+'</div></div>'
-    + '<div class="fact"><div class="k">'+(t.status==="resolved"?"Estado":"Abierto hace")+'</div>'
-    + '<div class="v'+(late?" warn":"")+'">'+(t.status==="resolved"?"Resuelto":ageLabel(a))+'</div></div>'
-    + '<div class="fact"><div class="k">Última actualización</div><div class="v">'+fmtDate(lastUpdate(t))+'</div></div>'
-    + '<div class="fact"><div class="k">Notas</div><div class="v">'+((t.notes||[]).length)+'</div></div>'
-    + '</div></div></div>';
-
-  /* contact */
-  h += '<div class="panel"><div class="panel-h">Contacto del reclamante</div><div class="panel-b">'
-    + '<dl class="contact">'
-    + '<dt>Nombre</dt><dd><input class="ghost" data-f="customer" value="'+esc(t.customer)+'"></dd>'
-    + '<dt>Email</dt><dd><div class="linkrow"><input class="ghost" data-f="email" value="'+esc(t.email||"")+'" placeholder="Sin email registrado">'
-    + (t.email?'<a class="go" href="mailto:'+esc(t.email)+'" title="Escribir un email"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3.5 7 8.5 6 8.5-6"/></svg></a>':'')
-    + '</div></dd>'
-    + '<dt>Teléfono</dt><dd><div class="linkrow"><input class="ghost" data-f="phone" value="'+esc(t.phone||"")+'" placeholder="Sin teléfono registrado">'
-    + (t.phone?'<a class="go" href="tel:'+esc(String(t.phone).replace(/[^+\d]/g,""))+'" title="Llamar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16.9v2.6a1.7 1.7 0 0 1-1.9 1.7 17 17 0 0 1-7.4-2.6 16.7 16.7 0 0 1-5.1-5.1A17 17 0 0 1 4 6.1 1.7 1.7 0 0 1 5.7 4.2h2.6a1.7 1.7 0 0 1 1.7 1.5c.1.8.3 1.6.6 2.4a1.7 1.7 0 0 1-.4 1.8l-1.1 1.1a13.6 13.6 0 0 0 5.1 5.1l1.1-1.1a1.7 1.7 0 0 1 1.8-.4c.8.3 1.6.5 2.4.6a1.7 1.7 0 0 1 1.5 1.7z"/></svg></a>':'')
-    + '</div></dd>'
-    + '<dt>Edificio</dt><dd><select class="ghost sel" data-loc="edificio">'+optsEdificio(partirLoc(t.location).edificio)+'</select></dd>'
-    + '<dt>Unidad</dt><dd><input class="ghost" data-loc="unidad" value="'+esc(partirLoc(t.location).unidad)+'" placeholder="Sin registrar"></dd>'
-    + '</dl></div></div>';
-
-  /* tracking */
-  h += '<div class="panel"><div class="panel-h">Seguimiento</div><div class="panel-b"><div class="grid2">'
-    + '<div class="fld"><label>Estado</label><select class="inp" data-s="status">'
-    + STATUSES.map(s=>'<option value="'+s.id+'"'+(t.status===s.id?" selected":"")+'>'+s.label+'</option>').join("")
-    + '</select></div>'
-    + '<div class="fld"><label>Prioridad</label><select class="inp" data-s="priority">'
-    + PRIORITIES.map(p=>'<option value="'+p.id+'"'+(t.priority===p.id?" selected":"")+'>'+p.label+'</option>').join("")
-    + '</select></div>'
-    + '<div class="fld"><label>Categoría</label><select class="inp" data-s="category">'
-    + CATEGORIES.map(c=>'<option value="'+esc(c)+'"'+(t.category===c?" selected":"")+'>'+esc(catLabel(c))+'</option>').join("")
-    + '</select></div>'
-    + '<div class="fld"><label>A cargo de</label><input class="inp" data-f="assignee" list="assigneeList" value="'+esc(t.assignee||"")+'" placeholder="Sin asignar"></div>'
-    + '</div></div></div>';
-
-  /* description */
-  h += '<div class="panel"><div class="panel-h">El reclamo</div><div class="panel-b">'
-    + '<input class="ghost tituloEd" data-f="titulo" value="'+esc(tituloDe(t))+'" placeholder="Título del reclamo">'
-    + '<textarea class="ghost" data-f="description" placeholder="Describí el reclamo…">'+esc(t.description||"")+'</textarea>'
-    + '</div></div>';
-
-  /* notes */
-  const notes = (t.notes||[]).slice().sort((x,y)=> x.at<y.at?-1:1);
-  h += '<div class="panel"><div class="panel-h">Notas de seguimiento</div>';
-  h += notes.length
-    ? notes.map(n=>'<div class="note"><div class="rail"><i></i><u></u></div><div class="bd">'
-        + '<time>'+fmtDate(n.at)+'</time><p>'+esc(n.text)+'</p></div></div>').join("")
-    : '<div class="note-empty">Todavía no hay notas.</div>';
-  h += '<div class="addnote">'
-    + '<textarea class="inp" id="noteBox" placeholder="Qué pasó, con quién hablaste, qué sigue…" style="min-height:64px"></textarea>'
-    + '<button class="btn" id="addNote" style="margin-top:8px">Agregar nota</button></div>';
-  h += '</div>';
-
-  h += '</div></div>';
-
-  /* footer */
-  h += '<div class="detail-foot">'
-    + '<button class="btn" id="delBtn" style="color:var(--alert)">Eliminar ticket</button>'
-    + '<div style="flex:1"></div>'
-    + '<span style="font-size:11.5px;color:var(--text-3)">Los cambios se guardan solos</span>'
-    + '</div>';
-
-  box.innerHTML = h;
-  wireDetail(t);
-  renderPresencia();
-}
-
-function wireDetail(t){
-  /* free-text fields: save when the user leaves the field */
-  $$("#detailInner [data-f]").forEach(function(el){
-    el.addEventListener("change", function(){
-      const k = el.dataset.f;
-      t[k] = el.value.trim();
-      pushTicket(t);
-      renderSide(); renderList();
-      if(k==="titulo"){
-        const sub = $("#detailInner .detail-head .sub span"); if(sub) sub.textContent = tituloDe(t);
-      }
-      toast("Guardado");
-    });
-  });
-  /* edificio + unidad: dos campos que se guardan juntos en `location` */
-  const grabarLoc = function(){
-    const sel = $('#detailInner [data-loc="edificio"]');
-    const uni = $('#detailInner [data-loc="unidad"]');
-    if(!sel || !uni) return;
-    t.location = armarLoc(sel.value, uni.value);
-    pushTicket(t);
-    renderSide(); renderList();
-    const h2 = $("#detailInner h2"); if(h2) h2.textContent = t.location || "Sin unidad registrada";
-    toast("Guardado");
-  };
-  $$("#detailInner [data-loc]").forEach(function(el){ el.addEventListener("change", grabarLoc); });
-
-  /* dropdowns: these change how the ticket is filed, so redraw everything */
-  $$("#detailInner [data-s]").forEach(function(el){
-    el.addEventListener("change", function(){
-      t[el.dataset.s] = el.value;
-      if(el.dataset.s === "status"){
-        if(el.value === "resolved"){ if(!t.resolvedAt) t.resolvedAt = todayISO(); }
-        else delete t.resolvedAt;
-      }
-      pushTicket(t); renderSide(); renderList(); renderDetail();
-      toast("Actualizado");
-    });
-  });
-  const back = $("#backBtn");
-  if(back) back.addEventListener("click", function(){
-    $("#detail").classList.remove("on");
-    ui.selected = null; renderList(); renderDetail();
-  });
-  const add = $("#addNote");
-  if(add) add.addEventListener("click", function(){
-    const box = $("#noteBox");
-    const txt = box.value.trim();
-    if(!txt){ box.focus(); return; }
-    t.notes = t.notes || [];
-    t.notes.push({at:new Date().toISOString(), text:txt, by:(me&&me.nombre)||""});
-    pushTicket(t); renderList(); renderDetail(); toast("Nota agregada");
-  });
-  const del = $("#delBtn");
-  if(del) del.addEventListener("click", function(){
-    if(!confirm("¿Eliminar el ticket "+t.id+"? No se puede deshacer.")) return;
-    const idBorrado = t.id;
-    tickets = tickets.filter(x=>x.id!==idBorrado);
-    ui.selected = null; pushDelete(idBorrado); refresh(); toast("Ticket eliminado");
-  });
-}
-
-/* ================= render: dashboard ================= */
-const STATUS_COLOR = {open:"var(--open)", progress:"var(--progress)", resolved:"var(--resolved)"};
-const PRI_COLOR    = {urgent:"var(--alert)", high:"var(--open)", medium:"var(--progress)", low:"var(--text-3)"};
-
-function avg(nums){ return nums.length ? nums.reduce((a,b)=>a+b,0)/nums.length : null; }
-function oneDec(n){ return (Math.round(n*10)/10).toString(); }
-
-/* `sel` is the currently chosen key in this panel, or null. Everything is clickable;
-   the chosen one is marked and the rest are dimmed. */
-function donutHTML(parts, total, midLabel, sel, attr){
-  const R = 48, C = 2*Math.PI*R;
-  let off = 0, segs = "";
-  parts.forEach(function(p){
-    if(!p.n) return;
-    const len = total ? C*p.n/total : 0;
-    const dim = sel && sel!==p.id;
-    segs += '<circle class="seg" data-'+attr+'="'+esc(p.id)+'" cx="60" cy="60" r="'+R+'" fill="none"'
-         + ' stroke="'+p.color+'" stroke-width="14" opacity="'+(dim?".3":"1")+'"'
-         + ' stroke-dasharray="'+len.toFixed(2)+' '+(C-len).toFixed(2)+'"'
-         + ' stroke-dashoffset="'+(-off).toFixed(2)+'" transform="rotate(-90 60 60)"><title>'+esc(p.label)+'</title></circle>';
-    off += len;
-  });
-  if(!total) segs = '<circle cx="60" cy="60" r="'+R+'" fill="none" stroke="var(--surface-3)" stroke-width="14"/>';
-
-  return '<div class="donut"><div class="ring"><svg viewBox="0 0 120 120">'+segs+'</svg>'
-    + '<div class="mid"><b>'+total+'</b><span>'+midLabel+'</span></div></div>'
-    + '<div class="keys">'+parts.map(function(p){
-        const on = sel===p.id, dim = sel && !on;
-        return '<button class="key'+(on?" on":"")+(dim?" dim":"")+'" data-'+attr+'="'+esc(p.id)+'">'
-          + '<em style="background:'+p.color+'"></em>'
-          + '<span class="kl">'+esc(p.label)+'</span><span class="kv">'+p.n+'</span></button>';
-      }).join("")+'</div></div>';
-}
-
-function barListHTML(rows, sel, attr){
-  if(!rows.length) return '<div class="dempty">Nada para mostrar.</div>';
-  const max = Math.max.apply(null, rows.map(r=>r.total)) || 1;
-  return '<div class="barlist">' + rows.map(function(r){
-    const on = sel===r.id, dim = sel && !on;
-    const segs = r.parts.filter(p=>p.n>0).map(function(p){
-      return '<i style="width:'+(p.n/max*100)+'%;background:'+p.color+'"></i>';
-    }).join("");
-    return '<button class="barrow'+(on?" on":"")+(dim?" dim":"")+'" data-'+attr+'="'+esc(r.id)+'">'
-      + '<span class="bl" title="'+esc(r.label)+'">'+esc(r.label)+'</span>'
-      + '<span class="bn">'+r.note+'</span>'
-      + '<span class="track">'+segs+'</span></button>';
-  }).join("") + '</div>';
-}
-
-const STATUS_LEGEND = '<div class="legend">'
-  + STATUSES.map(s=>'<span><em style="background:'+STATUS_COLOR[s.id]+'"></em>'+s.label+'</span>').join("")
-  + '</div>';
-
-function renderDash(){
-  const list = scoped();
-  const n = list.length;
-  const by = {open:0, progress:0, resolved:0};
-  list.forEach(t=>{ by[t.status] = (by[t.status]||0)+1; });
-  const active = by.open + by.progress;
-  const overdue = list.filter(isOverdue);
-  const openOnes = list.filter(t=>t.status!=="resolved");
-
-  /* --- scope chips --- */
-  const X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
-  const chip = (dim,label) => '<span class="chip">'+esc(label)+'<button data-clear="'+dim+'" title="Quitar este filtro">'+X+'</button></span>';
-  const chips = [];
-  if(ui.view!=="all")     chips.push(chip("view", viewOf(ui.view).label));
-  if(ui.priority!=="all") chips.push(chip("priority", "Prioridad "+pri(ui.priority).label.toLowerCase()));
-  if(ui.category!=="all") chips.push(chip("category", catLabel(ui.category)));
-  if(ui.building!=="all") chips.push(chip("building", ui.building));
-  if(ui.assignee!=="all") chips.push(chip("assignee", assigneeLabel(ui.assignee)));
-  $("#dashScope").innerHTML = chips.length
-    ? chips.join("") + '<button class="btn ghost" data-clear="everything" style="height:24px;padding:0 9px;font-size:11.5px">Limpiar todo</button>'
-    : '<span style="font-size:12px;color:var(--text-3)">Todo — tocá cualquier número de abajo para acotar</span>';
-  $("#toListLabel").textContent = chips.length
-    ? (n===1 ? "Ver este ticket" : "Ver estos "+n+" tickets")
-    : "Ver todos los tickets";
-
-  /* --- KPIs --- */
-  const avgOpenAge = avg(openOnes.map(t=>ageDays(t.submitted)));
-  const resolved   = list.filter(t=>t.status==="resolved" && t.resolvedAt);
-  const avgResolve = avg(resolved.map(t=>daysBetween(t.submitted, t.resolvedAt)));
-  const last30     = list.filter(t=>t.status==="resolved" && t.resolvedAt && ageDays(String(t.resolvedAt).slice(0,10)) <= 30).length;
-  const new30      = list.filter(t=>ageDays(t.submitted) <= 30).length;
-  const oldest     = openOnes.length ? Math.max.apply(null, openOnes.map(t=>ageDays(t.submitted))) : 0;
-  const pctOverdue = active ? Math.round(overdue.length/active*100) : 0;
-
-  /* every KPI also picks a filter; `base` ignores the current one so a card is never a dead end */
-  const base = subset("view");
-  const reach = id => base.filter(viewOf(id).test).length;
-
-  let h = '<div class="kpis">';
-  h += kpi("active", "Reclamos activos", active,
-           (n? by.resolved+" resueltos de "+n+" en total" : "No hay tickets en este recorte"), "", "", reach("active"));
-  h += kpi("attn", "Necesitan atención", overdue.length,
-           (active? pctOverdue+"% de los reclamos activos" : "—"), overdue.length?"warn":"", "", reach("attn"));
-  h += kpi("active", "Antigüedad promedio, abiertos", avgOpenAge===null?"—":oneDec(avgOpenAge),
-           openOnes.length? "sobre "+openOnes.length+" todavía abiertos" : "nada abierto",
-           (avgOpenAge!==null && avgOpenAge>14)?"warn":"", avgOpenAge===null?"":"días", reach("active"));
-  h += kpi("resolved", "Tiempo promedio de resolución", avgResolve===null?"—":oneDec(avgResolve),
-           resolved.length? "sobre "+resolved.length+" resueltos" : "todavía no hay resueltos",
-           "", avgResolve===null?"":"días", reach("resolved"));
-  h += kpi("resolved30", "Resueltos, últimos 30 días", last30,
-           new30+" nuevos en el mismo período", last30?"good":"", "", reach("resolved30"));
-  h += kpi("stale", "Reclamo abierto más antiguo", openOnes.length?oldest:"—",
-           openOnes.length? "sigue esperando" : "nada abierto",
-           oldest>21?"warn":"", openOnes.length?"días":"", reach("stale"));
-  h += '</div>';
-
-  h += '<div class="cards">';
-
-  /* Each panel is built from the data with its OWN filter lifted, so the other
-     choices stay visible and clickable rather than collapsing to the current slice. */
-  const statusSel = ["open","progress","resolved"].indexOf(ui.view)>=0 ? ui.view : null;
-  const byStatus  = subset("view");
-  h += '<div class="dcard"><div class="dcard-h">Por estado</div><div class="dcard-b">'
-    + donutHTML(STATUSES.map(s=>({id:s.id, label:s.label,
-        n:byStatus.filter(t=>t.status===s.id).length, color:STATUS_COLOR[s.id]})),
-        byStatus.length, byStatus.length===1?"ticket":"tickets", statusSel, "status")
-    + '</div></div>';
-
-  /* priority */
-  const byPri = subset("priority");
-  const priRows = PRIORITIES.map(function(p){
-    const set = byPri.filter(t=>t.priority===p.id);
-    const un  = set.filter(t=>t.status!=="resolved").length;
-    return {id:p.id, label:p.label, total:set.length, note:set.length+(un?"  ·  "+un+" activos":""),
-            parts:[{n:un,color:PRI_COLOR[p.id]},{n:set.length-un,color:"var(--surface-3)"}]};
-  }).filter(r=>r.total>0);
-  h += '<div class="dcard"><div class="dcard-h">Por prioridad</div><div class="dcard-b">'
-    + barListHTML(priRows, ui.priority==="all"?null:ui.priority, "pri")
-    + '<div class="legend"><span><em style="background:var(--text-2)"></em>Activos</span>'
-    + '<span><em style="background:var(--surface-3)"></em>Resueltos</span></div>'
-    + '</div></div>';
-
-  /* category */
-  const byCat = subset("category");
-  const catRows = CATEGORIES.map(function(c){
-    const set = byCat.filter(t=>t.category===c);
-    return {id:c, label:catLabel(c), total:set.length, note:String(set.length),
-            parts:STATUSES.map(s=>({n:set.filter(t=>t.status===s.id).length, color:STATUS_COLOR[s.id]}))};
-  }).filter(r=>r.total>0).sort((a,b)=>b.total-a.total);
-  h += '<div class="dcard"><div class="dcard-h">Reclamos por categoría</div><div class="dcard-b">'
-    + barListHTML(catRows, ui.category==="all"?null:ui.category, "cat") + STATUS_LEGEND + '</div></div>';
-
-  /* workload by handler */
-  const byWho = subset("assignee");
-  const whoRows = assigneeKeys().map(function(k){
-    const set = byWho.filter(t=>assigneeKey(t)===k);
-    const late = set.filter(isOverdue).length;
-    return {id:k, label:assigneeLabel(k), total:set.length,
-            note:set.filter(t=>t.status!=="resolved").length+" activos"+(late?"  ·  "+late+" atrasados":""),
-            parts:STATUSES.map(s=>({n:set.filter(t=>t.status===s.id).length, color:STATUS_COLOR[s.id]}))};
-  }).filter(r=>r.total>0).sort((a,b)=>b.total-a.total);
-  h += '<div class="dcard"><div class="dcard-h">Carga por responsable</div><div class="dcard-b">'
-    + barListHTML(whoRows, ui.assignee==="all"?null:ui.assignee, "who") + STATUS_LEGEND + '</div></div>';
-
-  /* by building */
-  const byBld = subset("building");
-  const bRows = buildings().map(function(b){
-    const set = byBld.filter(t=>buildingOf(t)===b);
-    const late = set.filter(isOverdue).length;
-    return {id:b, label:b, total:set.length, note:set.length+(late?"  ·  "+late+" atrasados":""),
-            parts:STATUSES.map(s=>({n:set.filter(t=>t.status===s.id).length, color:STATUS_COLOR[s.id]}))};
-  }).filter(r=>r.total>0).sort((a,b)=>b.total-a.total);
-  h += '<div class="dcard"><div class="dcard-h">Reclamos por edificio</div><div class="dcard-b">'
-    + barListHTML(bRows, ui.building==="all"?null:ui.building, "bld") + STATUS_LEGEND + '</div></div>';
-
-  /* weekly intake */
-  const weeks = [];
-  for(let i=7;i>=0;i--){
-    const from = i*7 + 6, to = i*7;
-    weeks.push({
-      label: fmtShort(daysAgoISO(from)),
-      n: list.filter(t=>{ const d = ageDays(t.submitted); return d<=from && d>=to; }).length,
-      now: i===0
-    });
-  }
-  const wMax = Math.max.apply(null, weeks.map(w=>w.n)) || 1;
-  h += '<div class="dcard"><div class="dcard-h">Reclamos nuevos, últimas 8 semanas</div><div class="dcard-b">'
-    + '<div class="cols">' + weeks.map(function(w){
-        return '<div class="col'+(w.now?" now":"")+'"><span class="cv">'+(w.n||"")+'</span>'
-          + '<span class="bar" style="height:'+(w.n/wMax*76)+'%"></span>'
-          + '<span class="cl">'+w.label+'</span></div>';
-      }).join("") + '</div></div></div>';
-
-  /* attention list */
-  const worst = overdue.slice().sort((a,b)=>ageDays(b.submitted)-ageDays(a.submitted)).slice(0,6);
-  h += '<div class="dcard wide"><div class="dcard-h">Los que más esperan — arrancá por acá</div>';
-  h += worst.length ? worst.map(function(t){
-      return '<button class="attn-row" data-go="'+esc(t.id)+'">'
-        + '<span class="d">'+ageDays(t.submitted)+'d</span>'
-        + '<span class="nm"><b>'+esc(t.location||t.id)+'</b>'
-        + '<span>'+esc(tituloDe(t))+' · '+esc(catLabel(t.category))+' · '+esc(t.assignee||"Sin asignar")+'</span></span>'
-        + priHTML(t.priority)+staHTML(t.status)+'</button>';
-    }).join("") : '<div class="dempty">No hay nada atrasado en este recorte. 👍</div>';
-  h += '</div>';
-
-  h += '</div>';
-
-  /* filtering redraws the whole panel, so keep the reader where they were */
-  const keep = $("#dashBody").scrollTop;
-  $("#dashBody").innerHTML = h;
-  $("#dashBody").scrollTop = keep;
-}
-
-function kpi(viewId, label, value, sub, cls, unit, reachable){
-  const on = ui.view === viewId;
-  /* clickable while it leads somewhere, and always clickable when it is the one to switch off */
-  const live = on || reachable > 0;
-  return '<button class="kpi'+(cls?" "+cls:"")+(on?" on":"")+(live?" click":" off")+'"'
-    + (live?' data-kpi="'+viewId+'"':' disabled')
-    + ' title="'+(on?"Tocá para quitar este filtro":(live?"Tocá para ver solo estos":"Nada para mostrar"))+'">'
-    + '<div class="k">'+label+'</div>'
-    + '<div class="v">'+value+(unit?'<small>'+unit+'</small>':'')+'</div>'
-    + '<div class="s">'+sub+'</div></button>';
-}
-
-/* one place that changes a filter: picking the same value again clears it */
-function setFilter(dim, value){
-  ui[dim] = (ui[dim] === value) ? "all" : value;
-  refresh();
-}
-
-
-function closeSidebar(){
-  $("#side").classList.remove("on");
-  $("#scrim").classList.remove("on");
-}
-
-/* show either the dashboard or the list+detail pair */
-function applyMode(){
-  document.querySelector(".app").classList.toggle("on-dash", ui.mode==="dashboard");
-}
-/* redraw after any change to the filters */
-function refresh(){
-  applyMode();
-  renderSide();
-  if(ui.mode==="dashboard"){ renderDash(); return; }
-  renderList();
-  if(!visible().some(t=>t.id===ui.selected)) selectFirst(); else renderDetail();
-}
-
-function select(id){
-  const cambio = ui.selected !== id;
-  ui.selected = id;
-  renderList(); renderDetail();
-  if(cambio){ otros = []; avisado = null; latido(); programarLatido(); }
-  if(isNarrow()) $("#detail").classList.add("on");
-  const el = $('#list .item[data-id="'+id+'"]');
-  if(el) el.scrollIntoView({block:"nearest"});
-}
-function selectFirst(){
-  const list = visible();
-  if(!isNarrow() && list.length) select(list[0].id);
-  else { ui.selected = null; renderList(); renderDetail(); }
-}
-
-/* ================= new ticket ================= */
-function openModal(){
-  $("#nCategory").innerHTML = CATEGORIES.map(c=>'<option value="'+esc(c)+'">'+esc(catLabel(c))+'</option>').join("");
-  $("#nPriority").innerHTML = PRIORITIES.map(p=>'<option value="'+p.id+'"'+(p.id==="medium"?" selected":"")+'>'+p.label+'</option>').join("");
-  $("#nBuilding").innerHTML = optsEdificio("");
-  $("#nDate").value = todayISO();
-  ["#nCustomer","#nEmail","#nPhone","#nUnit","#nAssignee","#nDesc","#nTitulo"].forEach(s=>{ $(s).value=""; });
-  tituloTocado = false;
-  refreshAssigneeList();
-  $("#modal").classList.add("on"); $("#modal").setAttribute("aria-hidden","false");
-  $("#scrim").classList.add("on");
-  setTimeout(()=>$("#nCustomer").focus(),60);
-}
-function closeModal(){
-  $("#modal").classList.remove("on"); $("#modal").setAttribute("aria-hidden","true");
-  $("#scrim").classList.remove("on");
-}
-function refreshAssigneeList(){
-  $("#assigneeList").innerHTML = assigneeKeys().filter(k=>k!==NOBODY)
-    .map(a=>'<option value="'+esc(a)+'">').join("");
-}
-/* El titulo se completa solo mientras se escribe el reclamo, salvo que el
-   usuario lo haya escrito a mano: ahi no se pisa mas. */
-let tituloTocado = false;
-function sugerirTitulo(){
-  if(tituloTocado) return;
-  $("#nTitulo").value = tituloAuto($("#nDesc").value);
-}
-
-async function createTicket(){
-  const name = $("#nCustomer").value.trim();
-  if(!name){ $("#nCustomer").focus(); toast("Hace falta el nombre del reclamante"); return; }
-  const edificio = $("#nBuilding").value;
-  if(!edificio){ $("#nBuilding").focus(); toast("Elegí el edificio"); return; }
-  const desc = $("#nDesc").value.trim();
-  /* id provisional: el definitivo lo asigna el servidor, para que dos personas
-     creando un ticket a la vez no terminen con el mismo numero */
-  const t = {
-    id:"TMP-"+Date.now()+"-"+Math.floor(Math.random()*1000), customer:name,
-    email:$("#nEmail").value.trim(), phone:$("#nPhone").value.trim(),
-    location:armarLoc(edificio, $("#nUnit").value), category:$("#nCategory").value,
-    submitted:$("#nDate").value || todayISO(), status:"open",
-    priority:$("#nPriority").value, assignee:$("#nAssignee").value.trim(),
-    description:desc, titulo:($("#nTitulo").value.trim() || tituloAuto(desc)), notes:[]
-  };
-  tickets.push(t);
-  DIMS.forEach(d=>{ ui[d]="all"; }); ui.mode="tickets"; ui.q=""; $("#q").value="";
-  closeModal(); applyMode(); renderSide(); renderList(); refreshAssigneeList(); select(t.id);
-  setSync("saving");
-  try{
-    const d = await api("guardar", {ticket:t});
-    stamp = d.stamp || stamp;
-    if(ui.selected === t.id) ui.selected = d.id;
-    t.id = d.id;
-    t.updated_at = d.updated_at || "";
-    renderList(); renderDetail(); setSync("ok");
-    toast("Ticket "+t.id+" creado");
-  }catch(e){
-    if(e.message==="sesion") return;
-    pushTicket(t);                       /* sin red: queda en cola */
-    toast("Ticket creado, se envía al recuperar la conexión");
-  }
-}
-
-/* ================= import / export ================= */
-function download(name, text, type){
-  const blob = new Blob([text], {type:type||"text/plain;charset=utf-8"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href=url; a.download=name; document.body.appendChild(a); a.click();
-  document.body.removeChild(a); setTimeout(()=>URL.revokeObjectURL(url),1500);
-}
-function exportCSV(){
-  const cols=["Ticket","Edificio","Unidad","Título","Reclamante","Email","Teléfono","Categoría","Ingresado","Días abierto","Estado","Prioridad","A cargo de","Reclamo","Notas"];
-  const q = v => '"'+String(v==null?"":v).replace(/"/g,'""')+'"';
-  const rows = visible().map(t=>[
-    t.id,buildingOf(t),unitOf(t),tituloDe(t),t.customer,t.email,t.phone,catLabel(t.category),t.submitted,
-    t.status==="resolved"?"":ageDays(t.submitted),
-    sta(t.status).label, pri(t.priority).label, t.assignee, t.description,
-    (t.notes||[]).map(n=>fmtDate(n.at)+": "+n.text).join(" | ")
-  ].map(q).join(","));
-  download("ticketflow-"+todayISO()+".csv", "﻿"+cols.map(q).join(",")+"\n"+rows.join("\n"), "text/csv;charset=utf-8");
-  toast("Planilla exportada");
-}
-function backup(){
-  download("ticketflow-backup-"+todayISO()+".json",
-    JSON.stringify({version:1, saved:new Date().toISOString(), tickets:tickets}, null, 2), "application/json");
-  toast("Copia guardada");
-}
-/* Reemplazo masivo (restore / reset). Solo un admin puede hacerlo. */
-async function reemplazarTodo(lista, msg){
-  setSync("saving");
-  try{
-    const d = await api("importar", {tickets:lista});
-    stamp = d.stamp || stamp;
-    await pull();
-    ui.selected = null; refresh(); refreshAssigneeList();
-    setSync("ok"); toast(msg);
-  }catch(e){
-    if(e.message==="sesion") return;
-    setSync("pending"); alert("No se pudo reemplazar: "+e.message);
-  }
-}
-function restore(file){
-  const r = new FileReader();
-  r.onload = function(){
-    try{
-      const d = JSON.parse(r.result);
-      if(!d || !Array.isArray(d.tickets)) throw new Error("bad");
-      if(!confirm("¿Reemplazar los "+tickets.length+" tickets actuales por los "+d.tickets.length+" tickets de esta copia?")) return;
-      reemplazarTodo(d.tickets.map(migrate), "Copia restaurada");
-    }catch(e){ alert("No se pudo leer ese archivo como una copia de TicketFlow."); }
-  };
-  r.readAsText(file);
-}
-
-/* ================= theme ================= */
-function applyTheme(mode){
-  const m = mode || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  document.documentElement.setAttribute("data-theme", m);
-  $("#themeIcon").innerHTML = m==="dark"
-    ? '<circle cx="12" cy="12" r="4.2"/><path d="M12 3v2M12 19v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M3 12h2M19 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/>'
-    : '<path d="M20 14.5A8.2 8.2 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z"/>';
-}
-
-/* ================= events ================= */
-function bind(){
-  $("#q").addEventListener("input", function(){
-    ui.q = this.value;
-    /* searching is about finding a ticket, so leave the dashboard for the list */
-    if(ui.mode==="dashboard" && ui.q.trim()){ ui.mode="tickets"; refresh(); return; }
-    renderList();
-  });
-
-  $("#side").addEventListener("click", function(e){
-    const b = e.target.closest("button");
-    if(!b) return;
-    if(b.dataset.mode!==undefined) ui.mode = b.dataset.mode;
-    else if(b.dataset.view!==undefined){ ui.view = b.dataset.view; ui.mode = "tickets"; }
-    else if(b.dataset.cat!==undefined) ui.category = b.dataset.cat;
-    else return;
-    closeSidebar();
-    refresh();
-  });
-
-  /* the building / handler dropdowns */
-  $("#side").addEventListener("change", function(e){
-    if(e.target.id === "bldSel") ui.building = e.target.value;
-    else if(e.target.id === "whoSel") ui.assignee = e.target.value;
-    else return;
-    closeSidebar();
-    refresh();
-  });
-
-  /* open the current dashboard slice as a ticket list, filters intact */
-  $("#toList").addEventListener("click", function(){ ui.mode = "tickets"; refresh(); });
-
-  /* clearing a filter chip on the dashboard */
-  $("#dashScope").addEventListener("click", function(e){
-    const b = e.target.closest("button[data-clear]");
-    if(!b) return;
-    if(b.dataset.clear === "everything") DIMS.forEach(d=>{ ui[d] = "all"; });
-    else ui[b.dataset.clear] = "all";
-    refresh();
-  });
-
-  /* every figure on the dashboard is also a filter */
-  $("#dashBody").addEventListener("click", function(e){
-    const go = e.target.closest("button[data-go]");
-    if(go){
-      ui.mode = "tickets";
-      applyMode(); renderSide(); renderList();
-      select(go.dataset.go);
-      return;
-    }
-    const el = e.target.closest("[data-kpi],[data-status],[data-pri],[data-cat],[data-who],[data-bld]");
-    if(!el) return;
-    const d = el.dataset;
-    if(d.kpi    !== undefined) return setFilter("view", d.kpi);
-    if(d.status !== undefined) return setFilter("view", d.status);
-    if(d.pri    !== undefined) return setFilter("priority", d.pri);
-    if(d.cat    !== undefined) return setFilter("category", d.cat);
-    if(d.who    !== undefined) return setFilter("assignee", d.who);
-    if(d.bld    !== undefined) return setFilter("building", d.bld);
-  });
-
-  $("#sortSel").addEventListener("change", function(){ ui.sort=this.value; renderList(); });
-
-  $("#list").addEventListener("click", function(e){
-    const b = e.target.closest(".item[data-id]");
-    if(b) select(b.dataset.id);
-  });
-
-  $("#newBtn").addEventListener("click", openModal);
-  $("#mCancel").addEventListener("click", closeModal);
-  $("#mSave").addEventListener("click", createTicket);
-  $("#nDesc").addEventListener("input", sugerirTitulo);
-  $("#nTitulo").addEventListener("input", function(){ tituloTocado = true; });
-
-  $("#sideBtn").addEventListener("click", function(e){
-    e.stopPropagation();
-    const on = $("#side").classList.toggle("on");
-    $("#scrim").classList.toggle("on", on);
-  });
-  $("#scrim").addEventListener("click", function(){
-    closeModal(); $("#side").classList.remove("on"); $("#scrim").classList.remove("on");
-  });
-
-  const menu = $("#moreMenu");
-  $("#moreBtn").addEventListener("click", function(e){ e.stopPropagation(); menu.classList.toggle("on"); });
-  document.addEventListener("click", function(){ menu.classList.remove("on"); });
-  menu.addEventListener("click", function(e){
-    const b = e.target.closest("button[data-act]");
-    if(!b) return;
-    menu.classList.remove("on");
-    const act = b.dataset.act;
-    if(act==="csv") exportCSV();
-    if(act==="backup") backup();
-    if(act==="restore") $("#fileIn").click();
-    if(act==="logout") doLogout();
-    if(act==="reset"){
-      if(!confirm("¿Reemplazar todo por los tickets de ejemplo originales? Se pierde lo que hayas cargado.")) return;
-      reemplazarTodo(seed(), "Datos de ejemplo restaurados");
-    }
-  });
-  $("#fileIn").addEventListener("change", function(){ if(this.files&&this.files[0]) restore(this.files[0]); this.value=""; });
-
-  $("#themeBtn").addEventListener("click", function(){
-    const next = document.documentElement.getAttribute("data-theme")==="dark" ? "light" : "dark";
-    try{ localStorage.setItem(THEME_KEY,next); }catch(e){}
-    applyTheme(next);
-  });
-
-  document.addEventListener("keydown", function(e){
-    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
-    if(e.key==="Escape"){ closeModal(); $("#side").classList.remove("on"); $("#scrim").classList.remove("on"); menu.classList.remove("on"); return; }
-    if(typing) return;
-    if(e.key==="/"){ e.preventDefault(); $("#q").focus(); return; }
-    if(e.key==="n"||e.key==="N"){ e.preventDefault(); openModal(); return; }
-    if(e.key==="d"||e.key==="D"){ e.preventDefault(); ui.mode="dashboard"; refresh(); return; }
-    if(e.key==="ArrowDown"||e.key==="ArrowUp"){
-      if(ui.mode==="dashboard") return;
-      const list = visible();
-      if(!list.length) return;
-      e.preventDefault();
-      let i = list.findIndex(t=>t.id===ui.selected);
-      i = e.key==="ArrowDown" ? Math.min(list.length-1, i+1) : Math.max(0, i<0?0:i-1);
-      select(list[i].id);
-    }
-  });
-
-  let wasNarrow = isNarrow();
-  window.addEventListener("resize", function(){
-    const now = isNarrow();
-    if(now!==wasNarrow){
-      wasNarrow = now;
-      if(!now) $("#detail").classList.remove("on");
-      if(!now && !ui.selected) selectFirst();
-    }
-  });
-}
-
-/* ================= start ================= */
-let savedTheme=null;
-try{ savedTheme = localStorage.getItem(THEME_KEY); }catch(e){}
-applyTheme(savedTheme);
-bind();
-
-$("#gBtn").addEventListener("click", doLogin);
-$("#gate").addEventListener("keydown", function(e){ if(e.key==="Enter") doLogin(); });
-
-async function arrancarApp(){
-  $("#whoami").textContent = (me && me.nombre) || "";
-  try{
-    await pull();
-  }catch(e){
-    if(e.message==="sesion") return;
-    setSync("off");
-    alert("No se pudieron traer los tickets: "+e.message);
-    return;
-  }
-  applyMode();
-  renderSide();
-  renderList();
-  refreshAssigneeList();
-  selectFirst();
-  renderDash();
-  $("#dashBody").scrollTop = 0;
-  setSync(qSize() ? "pending" : "ok");
-  if(qSize()) flush();
-  latido();
-  programarLatido();
-}
-
-(function(){
-  let guardado=null;
-  try{ guardado = JSON.parse(localStorage.getItem(USER_KEY)||"null"); }catch(e){}
-  if(localStorage.getItem(TOKEN_KEY) && guardado){
-    me = guardado;
-    hideGate();
-    arrancarApp();
-  }else{
-    showGate("");
-  }
-})();
-
-})();
-</script>
-</body>
-</html>
